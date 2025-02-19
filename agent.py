@@ -9,7 +9,7 @@ llm = ChatOpenAI(model="gpt-4o")
 
 async def main():
     agent = Agent(
-        task="Book the restaurant Delilah in LA for 15th feb for 5 people if available",
+        task="book a restaraunt for me in boston tonight for 2 people thats japanese and cheap at 9pm",
         llm=llm,
     )
     result = await agent.run()

@@ -1,3 +1,4 @@
+from asyncio.log import logger
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler
 import openai
@@ -10,11 +11,15 @@ from browser_use.browser.browser import Browser, BrowserConfig
 from langchain_openai import ChatOpenAI
 import json
 from datetime import datetime, timedelta
+import traceback
+from pydantic import SecretStr
+
 
 # Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 # Initialize OpenAI API client
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
@@ -40,51 +45,111 @@ def init_user_history(user_id):
 # --- 🧠 AI PROMPT GENERATION ---
 
 
-async def generate_browser_task_prompt(user_message: str, intent: str, user_id: str) -> str:
+async def generate_browser_task_prompt(user_message: str, task_type: str, user_id: str) -> str:
     """
-    Generates a browser-use compatible task prompt with chat context.
+    Generates browser task prompt based on task type and user message.
     """
-    # Get last 5 messages from history
-    history = user_data[user_id]['history'][-5:] if user_id in user_data else []
-    context = "\nPrevious conversation:\n" + "\n".join(
-        [f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}" for msg in history]
-    )
+    if task_type == "search":
+        prompt = f"""
+        TASK: Find real-time information for: "{user_message}"
+        
+        TIME LIMIT: 90 seconds total
+        
+        SEARCH STEPS:
+        1. [20s] Quick search on Google for best options
+        2. [30s] Check official websites/platforms:
+           - If flights: Google Flights, airline sites
+           - If restaurants: OpenTable, official websites
+           - If events: Ticketmaster, venue sites
+           - If hotels: Booking.com, hotel sites
+        3. [20s] Verify current information:
+           - Prices/availability
+           - Times/schedules
+           - Special conditions
+        4. [20s] Get booking details:
+           - Direct booking links
+           - Contact information
+           - Important notes
+        
+        FORMAT RESULTS:
+        1. OPTIONS FOUND:
+           - Names/details
+           - Current prices
+           - Available times
+           - Direct booking URLs
+        
+        2. IMPORTANT INFO:
+           - Special conditions
+           - Additional fees
+           - Requirements
+        
+        3. BOOKING OPTIONS:
+           - Direct booking links
+           - Phone numbers
+           - Alternative booking methods
+        
+        Keep responses focused and include all relevant URLs and contact details.
+        """
 
-    system_prompt = f"""
-    You are a prompt engineer for a web automation system.
-    
-    {context}
-    
-    Current user message: "{user_message}"
-    Intent: {intent}
+    elif task_type == "availability_check":
+        prompt = f"""
+        TASK: Check current availability for: "{user_message}"
+        
+        TIME LIMIT: 90 seconds
+        
+        STEPS:
+        1. [30s] Access relevant booking platform
+        2. [30s] Check specific availability
+        3. [30s] Verify details and alternatives
+        
+        FORMAT RESULTS:
+        - Available options
+        - Current prices
+        - Direct booking links
+        - Alternative choices
+        """
 
-    Create a specific browser automation task that:
-    1. Identifies the exact type of request (restaurant booking, hotel reservation, event tickets, etc.)
-    2. Extracts all relevant details (dates, times, people, preferences, price ranges)
-    3. Formats it into a clear, direct browser instruction
+    elif task_type == "booking":
+        prompt = f"""
+        TASK: Make a booking for: "{user_message}"
+        
+        TIME LIMIT: 90 seconds
+        
+        STEPS:
+        1. [30s] Access booking system
+        2. [30s] Enter required details
+        3. [30s] Complete reservation
+        
+        FORMAT RESULTS:
+        - Booking confirmation
+        - Important details
+        - Next steps
+        """
 
-    Examples of good task prompts:
-    - "check the availability for nobu malibu for 2 people on the 18th for sometime in the 2 oclock"
-    - "search for 5-star hotels in paris under 300 euros per night for 2 adults from march 15-20"
+    else:
+        prompt = f"""
+        TASK: General search for: "{user_message}"
+        
+        TIME LIMIT: 90 seconds
+        
+        STEPS:
+        1. [30s] Search options
+        2. [30s] Compare choices
+        3. [30s] Collect details
+        
+        FORMAT RESULTS:
+        - Available options
+        - Key information
+        - Booking/contact details
+        """
 
-    Return ONLY the task prompt. No explanations or additional text.
-    Make it specific enough for a browser to follow but natural enough for an AI to understand.
-    """
-
-    response = await asyncio.to_thread(
-        client.chat.completions.create,
-        model="gpt-4o",
-        messages=[{"role": "system", "content": system_prompt}]
-    )
-
-    return response.choices[0].message.content.strip()
+    return prompt
 
 
 async def classify_user_request(message: str, user_id: str):
     """
     Classifies the intent with chat context.
     """
-    # Get last 5 messages from history
     history = user_data[user_id]['history'][-5:] if user_id in user_data else []
     context = "\nPrevious conversation:\n" + "\n".join(
         [f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}" for msg in history]
@@ -95,14 +160,18 @@ async def classify_user_request(message: str, user_id: str):
     
     Current message: "{message}"
     
-    Classify the intent into one of these categories:
-    1. Recommendation Request
-    2. Availability Check
-    3. Booking Request
-    4. General Inquiry
-
-    Respond only with the category number (1, 2, 3, or 4).
-    Consider the conversation context when determining the intent.
+    Classify this request into exactly one category by returning ONLY its number:
+    2 - If the request needs real-time information (sports games, current availability, what's happening now)
+    1 - If it's only asking for general recommendations without needing current information
+    3 - If it's specifically about making a booking
+    
+    Examples:
+    "What's a good Italian restaurant?" -> 2
+    "Where can I watch the game tonight?" -> 2
+    "Find me a bar showing hockey" -> 2
+    "Make a reservation" -> 3
+    
+    Return ONLY the number (1, 2, or 3). Do not include any other text or explanation.
     """
 
     response = await asyncio.to_thread(
@@ -111,42 +180,92 @@ async def classify_user_request(message: str, user_id: str):
         messages=[{"role": "system", "content": prompt}]
     )
 
-    return response.choices[0].message.content.strip()
+    # Extract just the number from the response
+    result = response.choices[0].message.content.strip()
+    # Remove any non-numeric characters
+    result = ''.join(filter(str.isdigit, result))
+    return result
 
 # --- 🔍 AVAILABILITY CHECKING ---
 
 
 async def format_reply_for_user(user_request: str, agent_result: str) -> str:
     """
-    Formats the agent's result into a natural, concierge-style response.
+    Formats the agent's result into a detailed, concierge-style response with all relevant links and information.
     """
     prompt = f"""
-    You are a professional concierge assistant.
+    You are a helpful and professional concierge assistant.
     
-    Original user request: "{user_request}"
-    Browser agent result: "{agent_result}"
+    Original request: "{user_request}"
+    Search results: "{agent_result}"
 
-    Create a natural, helpful response that:
-    1. Acknowledges the user's request
-    2. Provides the information clearly
-    3. Suggests next steps if applicable
-    4. Maintains a professional but friendly tone
-    5. Includes all relevant details (times, dates, contact info)
+    Create a detailed, friendly response that includes ALL of the following:
+    1. Warm greeting and acknowledgment of the request
+    2. Main findings and recommendations
+    3. For EACH option found:
+       - Full details (price, timing, ratings, etc.)
+       - Direct booking/information links
+       - Contact information
+       - Special conditions or requirements
+    4. Important notes (fees, policies, restrictions)
+    5. Next steps and booking options
+    6. Offer for additional assistance
 
-    Examples of good responses:
-    - "I've checked O Ya for you, and I'm happy to say they have availability at 7:30 PM this Friday. Would you like me to help you make a reservation?"
-    - "I'm sorry, but Giulia is fully booked for your requested time. The earliest availability is next Tuesday at 6:45 PM. They also accept walk-ins at the bar area. Would you like their contact number to discuss other options?"
+    REQUIRED FORMAT:
+    Start with a friendly greeting and summary.
+    Then list each option with ALL details and links.
+    End with next steps and offer to help.
 
-    Return ONLY the response message. No additional text or explanations.
+    EXAMPLE FORMAT:
+    "I've found several excellent options for you! Let me share the details:
+
+    1. [Property/Venue Name] - $X
+       • Full details (size, type, timing, etc.)
+       • Rating: X.X (X reviews)
+       • Direct booking: [exact URL]
+       • Contact: [phone/email]
+       • Special notes: [any important details]
+
+    2. [Next option with same detailed format]
+
+    Important Information:
+    • [List all fees, policies, requirements]
+    • [Include cancellation policies]
+    • [Note any time-sensitive details]
+
+    Direct Booking Links:
+    • [Option 1 Name]: [exact URL]
+    • [Option 2 Name]: [exact URL]
+
+    I can help you book any of these options directly or provide more information. Would you like to:
+    1. Get more details about any option?
+    2. See additional choices?
+    3. Proceed with booking?
+
+    Just let me know how I can assist!"
+
+    Return the response maintaining ALL links and contact information exactly as provided in the search results.
+
+    IMPORTANT:
+    - Keep responses concise but informative
+    - Focus on the most relevant details
+    - Limit repetitive information
+    - Use bullet points for better readability
+    - Keep total response under 4000 characters when possible
+    
     """
 
-    response = await asyncio.to_thread(
-        client.chat.completions.create,
-        model="gpt-4o",
-        messages=[{"role": "system", "content": prompt}]
-    )
+    try:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o",
+            messages=[{"role": "system", "content": prompt}]
+        )
 
-    return response.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Error formatting reply: {str(e)}")
+        return str(agent_result)  # Fallback to raw result if formatting fails
 
 
 async def check_availability_with_browser(user_message: str, update: Update):
@@ -203,7 +322,47 @@ async def book_using_browser_use(user_info):
 # --- 💡 RECOMMENDATION FUNCTIONS ---
 # Define required booking details
 REQUIRED_INFO = ["name", "email", "phone"]
-NAME, EMAIL, PHONE = range(3)
+NAME, EMAIL, PHONE, CONFIRMATION_CODE = range(4)
+
+
+async def handle_confirmation_code(update: Update, context: CallbackContext):
+    """
+    Handles the confirmation code input and completes the booking.
+    """
+    try:
+        user_id = update.message.from_user.id
+        confirmation_code = update.message.text.strip()
+
+        # Get the existing agent from context
+        agent = context.user_data.get('current_agent')
+        if not agent:
+            await update.message.reply_text("Sorry, the booking session has expired. Please start over.")
+            return ConversationHandler.END
+
+        # Continue the booking with the confirmation code
+        result = await agent.continue_task(f"Enter confirmation code: {confirmation_code}")
+        print(f"DEBUG: Booking result after confirmation: {result}")
+
+        # Convert result to string if it isn't already
+        result_text = str(result)
+
+        # Format and send response
+        formatted_response = await format_reply_for_user("Complete booking with confirmation code", result_text)
+        await update.message.reply_text(formatted_response)
+
+        # Clear booking info after successful booking
+        user_data[user_id]['booking_info'] = {}
+        context.user_data['booking_step'] = 0
+        context.user_data['current_agent'] = None
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        print(f"DEBUG: Error in handle_confirmation_code: {str(e)}")
+        print(f"DEBUG: Error type: {type(e)}")
+        print(f"DEBUG: Full error traceback:", traceback.format_exc())
+        await update.message.reply_text("Sorry, there was an error with the confirmation code. Please try again.")
+        return ConversationHandler.END
 
 
 async def gather_booking_info(update: Update, context: CallbackContext) -> int:
@@ -328,14 +487,45 @@ async def make_booking(update: Update, context: CallbackContext):
             llm=ChatOpenAI(model="gpt-4o")
         )
 
+        # Start the booking process
         result = await agent.run()
-        print(f"DEBUG: Booking result: {result}")
+        print(f"DEBUG: Initial booking result: {result}")
 
-        # Format the result into a user-friendly response
-        formatted_response = await format_reply_for_user(task_prompt, result)
+        # Convert result to string and check for confirmation code requirement
+        result_text = str(result)
+        print(f"DEBUG: Result text: {result_text}")
+
+        # Check if confirmation code is needed
+        if any(keyword in result_text.lower() for keyword in ["confirmation", "verification", "code", "verify", "email"]):
+            # Store the agent in context for later use
+            context.user_data['current_agent'] = agent
+
+            # Store booking context for later use
+            context.user_data['booking_context'] = booking_context
+
+            # Ask user for confirmation code
+            await update.message.reply_text(result_text)
+            await update.message.reply_text("Please enter the confirmation code from your email to complete the booking.")
+
+            # Add to history
+            user_data[user_id]['history'].append({
+                "role": "assistant",
+                "content": result_text
+            })
+
+            return CONFIRMATION_CODE
+
+        # If no confirmation needed, complete booking
+        formatted_response = await format_reply_for_user(task_prompt, result_text)
         await update.message.reply_text(formatted_response)
 
-        # Clear booking info after successful booking
+        # Add to history
+        user_data[user_id]['history'].append({
+            "role": "assistant",
+            "content": formatted_response
+        })
+
+        # Clear booking info
         user_data[user_id]['booking_info'] = {}
         context.user_data['booking_step'] = 0
 
@@ -343,7 +533,18 @@ async def make_booking(update: Update, context: CallbackContext):
 
     except Exception as e:
         print(f"DEBUG: Error in make_booking: {str(e)}")
-        await update.message.reply_text("Sorry, there was an error making the booking. Please try again.")
+        print(f"DEBUG: Error type: {type(e)}")
+        print(f"DEBUG: Full error traceback:", traceback.format_exc())
+
+        error_message = "Sorry, there was an error making the booking. Please try again."
+        await update.message.reply_text(error_message)
+
+        # Add error to history
+        user_data[user_id]['history'].append({
+            "role": "assistant",
+            "content": error_message
+        })
+
         return ConversationHandler.END
 
 
@@ -377,67 +578,248 @@ async def get_ai_recommendation(query, user_id=None):
 # --- 🎮 MESSAGE HANDLING ---
 
 
+def should_offer_booking(result) -> bool:
+    """
+    Determines if we should offer booking based on search results.
+    """
+    booking_indicators = ['reservation',
+                          'available', 'book', 'time slot', 'seating']
+
+    # Convert AgentHistoryList or any other type to string
+    result_str = str(result)
+
+    try:
+        return any(indicator in result_str.lower() for indicator in booking_indicators)
+    except AttributeError:
+        print(f"DEBUG: Result type: {type(result)}")
+        print(f"DEBUG: Result content: {result}")
+        return False
+
+async def handle_error(update: Update, context: CallbackContext):
+    """
+    Generic error handler that sends an error message to the user.
+    """
+    error_message = "Sorry, something went wrong. Please try again later."
+    await update.message.reply_text(error_message)
+
+async def format_detailed_reply(user_request: str, agent_result: str) -> dict:
+    """
+    Formats the agent's result into a detailed, structured response.
+    """
+    prompt = f"""
+    You are a professional concierge assistant.
+    
+    Original user request: "{user_request}"
+    Browser agent result: "{agent_result}"
+
+    Create a response with these components:
+    1. Main message: Clear summary of findings
+    2. Links: Extract any URLs mentioned (website, booking pages)
+    3. Venue details: Names, addresses, contact info
+    4. Current availability/schedules
+    5. Booking options
+    
+    Return a JSON object with these keys:
+    {{
+        "main_message": "The formatted main response",
+        "links": {{"venue_name": "url", ...}},
+        "venues": [{{
+            "name": "venue name",
+            "address": "address",
+            "contact": "contact info",
+            "availability": "current availability"
+        }}]
+    }}
+    """
+
+    try:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o",
+            messages=[{"role": "system", "content": prompt}]
+        )
+
+        # Parse the JSON response
+        result = json.loads(response.choices[0].message.content.strip())
+        return result
+    except Exception as e:
+        logger.error(f"Error formatting detailed reply: {str(e)}")
+        return {
+            "main_message": agent_result,
+            "links": {},
+            "venues": []
+        }
+    
+
+async def send_long_message(update: Update, text: str, max_length: int = 4000):
+    """
+    Splits and sends long messages within Telegram's character limit.
+    """
+    if len(text) <= max_length:
+        await update.message.reply_text(text)
+        return
+
+    # Split message into parts
+    parts = []
+    while text:
+        if len(text) <= max_length:
+            parts.append(text)
+            break
+
+        # Find the last complete sentence or line within the limit
+        split_point = text.rfind('\n', 0, max_length)
+        if split_point == -1:
+            split_point = text.rfind('. ', 0, max_length)
+        if split_point == -1:
+            split_point = max_length
+
+        parts.append(text[:split_point])
+        text = text[split_point:].strip()
+
+    # Send each part with a continuation indicator
+    for i, part in enumerate(parts):
+        if len(parts) > 1:
+            indicator = f"(Part {i+1}/{len(parts)})\n\n"
+            await update.message.reply_text(indicator + part)
+        else:
+            await update.message.reply_text(part)
+
+def extract_final_result(agent_result) -> str:
+    """
+    Extracts the final result from AgentHistoryList object.
+    """
+    try:
+        # If it's already a string, return it
+        if isinstance(agent_result, str):
+            return agent_result
+            
+        # Get all results that are marked as done and have content
+        completed_actions = [r for r in agent_result.all_results if r.is_done and r.extracted_content]
+        
+        # If we have completed actions, return the last one
+        if completed_actions:
+            return completed_actions[-1].extracted_content
+            
+        # If no completed actions, try to get any action with content
+        actions_with_content = [r for r in agent_result.all_results if r.extracted_content]
+        if actions_with_content:
+            return actions_with_content[-1].extracted_content
+            
+        # If all else fails, convert the entire result to string
+        return str(agent_result)
+        
+    except Exception as e:
+        print(f"DEBUG: Error extracting final result: {str(e)}")
+        print(f"DEBUG: Result type: {type(agent_result)}")
+        print(f"DEBUG: Raw result: {agent_result}")
+        return str(agent_result)
+    
 async def handle_user_message(update: Update, context: CallbackContext):
     """
-    Main message handler with booking flow integration.
+    Main message handler with improved error handling and detailed information.
     """
     user_id = update.message.from_user.id
     user_message = update.message.text.lower()
-
-    # Initialize user history
-    init_user_history(user_id)
-    user_data[user_id]['history'].append(
-        {"role": "user", "content": user_message})
+    response = None
 
     try:
-        # Check if user wants to book after availability check
-        if "book it" in user_message or "make a booking" in user_message:
-            await update.message.reply_text("I'll help you make that booking!")
+        # Initialize user history
+        init_user_history(user_id)
+        user_data[user_id]['history'].append({
+            "role": "user",
+            "content": user_message
+        })
+
+        # Check for booking intent
+        if any(phrase in user_message for phrase in ["book it", "make a booking", "reserve"]):
+            response = "I'll help you make that booking!"
+            await update.message.reply_text(response)
             return await gather_booking_info(update, context)
 
-        # Regular intent processing
+        # Classify intent
         intent = await classify_user_request(user_message, user_id)
         print(f"DEBUG: Detected intent: {intent}")
 
-        if intent == "1" or intent == "1. Recommendation Request":
+        if intent == "2":  # Browser search needed
+            await update.message.reply_text("Let me search for current options...")
+
+            # Generate and execute browser task
+            task_prompt = await generate_browser_task_prompt(user_message, "search", user_id)
+            agent = Agent(
+                task=task_prompt,
+                llm=ChatOpenAI(model="gpt-4o")
+            )
+            result = await agent.run()
+            final_result = extract_final_result(result)
+            response = await format_reply_for_user(user_message, final_result)
+
+            # Use send_long_message instead of direct reply_text
+            # Convert response to string
+            await send_long_message(update, str(response))
+
+            # Store in history
+            user_data[user_id]['history'].append({
+                "role": "assistant",
+                "content": str(response)
+            })
+
+            # Format and send detailed response
+            response = await format_detailed_reply(user_message, response)
+            await update.message.reply_text(response['main_message'])
+
+            # Send additional details if available
+            if response.get('links'):
+                links_message = "\n📍 Direct links:\n" + "\n".join(
+                    [f"• {name}: {url}" for name,
+                        url in response['links'].items()]
+                )
+                await update.message.reply_text(links_message)
+
+            # Offer booking if applicable
+            if should_offer_booking(response):
+                booking_options = (
+                    "I can help you in two ways:\n"
+                    "1. Say 'book it' and I'll make the booking for you automatically\n"
+                    "2. Use the links above to book directly yourself"
+                )
+                await update.message.reply_text(booking_options)
+                response['main_message'] += f"\n\n{booking_options}"
+
+        elif intent == "1":  # General recommendations
             response = await get_ai_recommendation(user_message, user_id)
-            user_data[user_id]['last_recommendations'] = response
             await update.message.reply_text(response)
-            user_data[user_id]['history'].append({
-                "role": "assistant",
-                "content": response
-            })
 
-        elif intent == "2" or intent == "2. Availability Check":
-            await update.message.reply_text("I'll check the availability for you.")
-            response = await check_availability_with_browser(user_message, update)
+        elif intent == "3":  # Direct booking
+            response = "Let's get your booking information."
             await update.message.reply_text(response)
-            await update.message.reply_text("Would you like me to make a booking for you? Just say 'book it' and I'll help you with that.")
-            user_data[user_id]['history'].append({
-                "role": "assistant",
-                "content": response
-            })
-
-        elif intent == "3" or intent == "3. Booking Request":
             return await gather_booking_info(update, context)
 
         else:
-            response = "I can help you with restaurant recommendations, checking availability, or making bookings. What would you like to do?"
+            response = "I can help you with recommendations, checking availability, finding information, or making bookings. What would you like to do?"
             await update.message.reply_text(response)
+
+        # Store in history
+        if response:
+            content = response['main_message'] if isinstance(
+                response, dict) else response
             user_data[user_id]['history'].append({
                 "role": "assistant",
-                "content": response
+                "content": content
             })
+
+        return ConversationHandler.END
 
     except Exception as e:
         print(f"DEBUG: Error in handle_user_message: {str(e)}")
+        print(f"DEBUG: Full error traceback:", traceback.format_exc())
         error_message = "I encountered an error. Please try again."
         await update.message.reply_text(error_message)
+
         user_data[user_id]['history'].append({
             "role": "assistant",
             "content": error_message
         })
-
+        return ConversationHandler.END
 
 async def start(update: Update, context: CallbackContext):
     """
@@ -462,12 +844,9 @@ async def start(update: Update, context: CallbackContext):
 
 def main():
     """
-    Main function with all handlers setup.
+    Main function with conversation handler setup.
     """
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
 
     # Create conversation handler for booking flow
     conv_handler = ConversationHandler(
@@ -480,16 +859,13 @@ def main():
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_booking_info)],
             EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_booking_info)],
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_booking_info)],
+            CONFIRMATION_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_confirmation_code)],
         },
         fallbacks=[CommandHandler(
             'cancel', lambda u, c: ConversationHandler.END)],
     )
 
-    # Add conversation handler
     application.add_handler(conv_handler)
-
-    # Start the bot
-    print("Bot started...")
     application.run_polling()
 
 

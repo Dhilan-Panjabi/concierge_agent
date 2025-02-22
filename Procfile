@@ -1,1 +1,0 @@
-worker: python booking_agent1_test.py

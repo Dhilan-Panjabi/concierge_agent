@@ -54,10 +54,11 @@ langchain==0.3.14
 langchain-anthropic==0.3.3
 langchain-aws==0.2.12
 langchain-core==0.3.35
+langchain-deepseek==0.1.2
 langchain-fireworks==0.2.7
 langchain-google-genai==2.0.8
 langchain-ollama==0.2.2
-langchain-openai>=0.3.1
+langchain-openai==0.3.1
 langchain-text-splitters==0.3.6
 langsmith==0.2.11
 lmnr==0.4.60
@@ -102,7 +103,7 @@ pyee==12.1.1
 pyparsing==3.2.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
-python-telegram-bot==20.7
+python-telegram-bot==21.10
 pytz==2025.1
 pyyaml==6.0.2
 regex==2024.11.6
@@ -130,4 +131,3 @@ wsproto==1.2.0
 yarl==1.18.3
 zipp==3.21.0
 zope-interface==7.2
-asyncio==3.4.3

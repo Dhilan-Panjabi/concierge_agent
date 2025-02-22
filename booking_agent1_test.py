@@ -20,14 +20,17 @@ load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-
+STEEL_API_KEY = os.getenv("STEEL_API_KEY")
 # Initialize OpenAI API client
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 controller = Controller()
 
 # Initialize browser automation
-browser = Browser(BrowserConfig(headless=True))
+
+browser = Browser(config=BrowserConfig(
+    headless=True,
+))
 
 # Store user details and conversation history
 user_data = {}
@@ -282,7 +285,7 @@ async def check_availability_with_browser(user_message: str, update: Update):
 
         agent = Agent(
             task=task_prompt,
-            llm=ChatOpenAI(model="gpt-4o")
+            llm=ChatOpenAI(model="gpt-4o"),
         )
 
         result = await agent.run()
@@ -747,43 +750,32 @@ async def handle_user_message(update: Update, context: CallbackContext):
             task_prompt = await generate_browser_task_prompt(user_message, "search", user_id)
             agent = Agent(
                 task=task_prompt,
-                llm=ChatOpenAI(model="gpt-4o")
+                llm=ChatOpenAI(model="gpt-4o"),
             )
             result = await agent.run()
             final_result = extract_final_result(result)
-            response = await format_reply_for_user(user_message, final_result)
 
-            # Use send_long_message instead of direct reply_text
-            # Convert response to string
-            await send_long_message(update, str(response))
+            # Format the response
+            formatted_response = await format_reply_for_user(user_message, final_result)
+            
+            # Send the main response
+            await send_long_message(update, formatted_response)
 
             # Store in history
             user_data[user_id]['history'].append({
                 "role": "assistant",
-                "content": str(response)
+                "content": formatted_response
             })
 
-            # Format and send detailed response
-            response = await format_detailed_reply(user_message, response)
-            await update.message.reply_text(response['main_message'])
-
-            # Send additional details if available
-            if response.get('links'):
-                links_message = "\n📍 Direct links:\n" + "\n".join(
-                    [f"• {name}: {url}" for name,
-                        url in response['links'].items()]
-                )
-                await update.message.reply_text(links_message)
-
             # Offer booking if applicable
-            if should_offer_booking(response):
+            if should_offer_booking(formatted_response):
                 booking_options = (
-                    "I can help you in two ways:\n"
+                    "\n\nI can help you in two ways:\n"
                     "1. Say 'book it' and I'll make the booking for you automatically\n"
                     "2. Use the links above to book directly yourself"
                 )
                 await update.message.reply_text(booking_options)
-                response['main_message'] += f"\n\n{booking_options}"
+                response = formatted_response + booking_options
 
         elif intent == "1":  # General recommendations
             response = await get_ai_recommendation(user_message, user_id)
@@ -798,13 +790,11 @@ async def handle_user_message(update: Update, context: CallbackContext):
             response = "I can help you with recommendations, checking availability, finding information, or making bookings. What would you like to do?"
             await update.message.reply_text(response)
 
-        # Store in history
-        if response:
-            content = response['main_message'] if isinstance(
-                response, dict) else response
+        # Store in history if not already stored
+        if response and response != user_data[user_id]['history'][-1].get('content', None):
             user_data[user_id]['history'].append({
                 "role": "assistant",
-                "content": content
+                "content": response
             })
 
         return ConversationHandler.END

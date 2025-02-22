@@ -54,7 +54,6 @@ langchain==0.3.14
 langchain-anthropic==0.3.3
 langchain-aws==0.2.12
 langchain-core==0.3.35
-langchain-deepseek==0.1.2
 langchain-fireworks==0.2.7
 langchain-google-genai==2.0.8
 langchain-ollama==0.2.2

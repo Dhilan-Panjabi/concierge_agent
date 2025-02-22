@@ -58,7 +58,7 @@ langchain-deepseek==0.1.2
 langchain-fireworks==0.2.7
 langchain-google-genai==2.0.8
 langchain-ollama==0.2.2
-langchain-openai==0.3.6
+langchain-openai>=0.3.1
 langchain-text-splitters==0.3.6
 langsmith==0.2.11
 lmnr==0.4.60

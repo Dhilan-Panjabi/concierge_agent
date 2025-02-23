@@ -8,6 +8,7 @@ from typing import Optional, List, Dict
 
 from openai import OpenAI
 from src.config.settings import Settings
+from src.utils.message_utils import MessageUtils
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class AIService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.message_utils = MessageUtils()
 
     async def classify_intent(self, message: str, user_id: str) -> str:
         """
@@ -31,7 +33,7 @@ class AIService:
             str: Classified intent
         """
         try:
-            history = self._get_user_history(user_id)
+            history = await self._get_user_history(user_id)
             context = self._format_history_context(history)
 
             prompt = f"""
@@ -43,14 +45,16 @@ class AIService:
             2 - If the request needs real-time information (sports games, current availability, what's happening now)
             1 - If it's only asking for general recommendations without needing current information
             3 - If it's specifically about making a booking
+            4 - If it's a profile management request (update profile, view profile, etc.)
             
             Examples:
             "What's a good Italian restaurant?" -> 2
             "Where can I watch the game tonight?" -> 2
             "Find me a bar showing hockey" -> 2
             "Make a reservation" -> 3
+            "Update my profile" -> 4
             
-            Return ONLY the number (1, 2, or 3). Do not include any other text or explanation.
+            Return ONLY the number (1, 2, 3, or 4). Do not include any other text or explanation.
             """
 
             response = await self._get_ai_response(prompt)
@@ -78,19 +82,44 @@ class AIService:
             SEARCH RESULTS: {agent_result}
             
             FORMAT GUIDELINES:
-            1. Structure the response clearly with sections
-            2. Highlight key information (prices, times, contact details)
-            3. Include all URLs and contact information exactly as provided
-            4. Add helpful context where needed
-            5. Keep the tone friendly and helpful
-            6. Use bullet points for better readability
-            7. Keep total response under 4000 characters when possible
+            1. Structure the response clearly with sections:
+               - Hotel Overview (maintain focus on the specific hotel mentioned in the request)
+               - Room Availability for the requested dates
+               - Room Types & Current Rates
+               - Special Offers (if any)
+               - Booking Conditions
             
-            IMPORTANT:
-            - Keep all URLs and contact information intact
-            - Maintain accuracy of prices and availability
-            - Include booking instructions if relevant
-            """
+            2. For each room type include:
+               - Room name/category
+               - Current rate per night in the local currency (EUR for Milan hotels)
+               - Room features and amenities
+               - Available dates
+               - Any restrictions or minimum stay requirements
+            
+            3. Additional Information:
+               - Highlight any special packages or deals
+               - Note any included amenities (breakfast, parking, etc.)
+               - Mention cancellation policy
+               - Include check-in/check-out times
+            
+            4. Formatting:
+               - Use bullet points for better readability
+               - Bold important information (prices, dates)
+               - Keep URLs and contact information intact
+               - Maintain a professional yet friendly tone
+            
+            5. End with:
+               - Direct booking link or contact information
+               - Any required deposits or additional fees
+               - Special notes about the location or current events in the area
+            
+            IMPORTANT: 
+            - Focus ONLY on the specific hotel and location mentioned in the user request
+            - Ensure all prices are in the correct local currency
+            - If the search results don't match the requested hotel/location, indicate that there might be an error
+            
+            Keep the response clear, accurate, and focused on the specific hotel and dates requested.
+            Include all pricing and availability information exactly as provided."""
 
             response = await self._get_ai_response(prompt)
             return response.strip()
@@ -121,7 +150,7 @@ class AIService:
             logger.error(f"Error getting AI response: {e}", exc_info=True)
             raise
 
-    def _get_user_history(self, user_id: str) -> List[Dict[str, str]]:
+    async def _get_user_history(self, user_id: str) -> List[Dict[str, str]]:
         """
         Gets user conversation history.
         
@@ -131,8 +160,8 @@ class AIService:
         Returns:
             List[Dict[str, str]]: Conversation history
         """
-        from src.utils.message_utils import MessageUtils
-        return MessageUtils.get_user_history(user_id)[-5:]  # Last 5 messages
+        history = await self.message_utils.get_user_history(int(user_id))
+        return history[-5:] if history else []  # Last 5 messages
 
     @staticmethod
     def _format_history_context(history: List[Dict[str, str]]) -> str:

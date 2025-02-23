@@ -59,6 +59,10 @@ class Settings:
         self.MAX_HISTORY_LENGTH: int = self._get_env_int(
             'MAX_HISTORY_LENGTH', 10)
 
+        # Supabase settings
+        self.SUPABASE_URL: str = self._get_env('SUPABASE_URL')
+        self.SUPABASE_KEY: str = self._get_env('SUPABASE_KEY')
+
         # Validate settings
         self._validate_settings()
 
@@ -144,6 +148,8 @@ class Settings:
             ('OPENAI_API_KEY', self.OPENAI_API_KEY),
             ('DEEPSEEK_API_KEY', self.DEEPSEEK_API_KEY),
             ('STEEL_API_KEY', self.STEEL_API_KEY),
+            ('SUPABASE_URL', self.SUPABASE_URL),
+            ('SUPABASE_KEY', self.SUPABASE_KEY),
         ]
 
         for name, value in required_settings:

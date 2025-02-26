@@ -53,6 +53,7 @@ class Settings:
             'BROWSERLESS_URL',
             'wss://chrome.browserless.io'
         )
+        self.BROWSERLESS_TOKEN: Optional[str] = os.getenv('BROWSERLESS_TOKEN', '')
 
         # AI Model settings
         self.GPT_MODEL: str = self._get_env('GPT_MODEL', 'gpt-4o')
@@ -196,6 +197,7 @@ class Settings:
             'headless': self.BROWSER_HEADLESS,
             'browserless': self.BROWSER_BROWSERLESS,
             'browserless_url': self.BROWSERLESS_URL,
+            'browserless_token': self.BROWSERLESS_TOKEN,
         }
 
     def get_timeout_config(self) -> dict:

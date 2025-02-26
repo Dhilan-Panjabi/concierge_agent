@@ -623,6 +623,18 @@ class BrowserService:
                 disable_security=True
             )
             
+            # Add browserless configuration if enabled
+            if self.browser_config.get('browserless', False):
+                # Set browserless URL
+                self.browser_config_obj.wss_url = self.browser_config.get('browserless_url')
+                
+                # Set browserless token if available
+                if self.browser_config.get('browserless_token'):
+                    self.browser_config_obj.token = self.browser_config.get('browserless_token')
+                    self.logger.info("Browserless token configured")
+                
+                self.logger.info(f"Browserless configuration added: URL={self.browser_config_obj.wss_url}")
+            
             # Initialize class-level browser config
             BrowserService._browser_config = self.browser_config_obj
             

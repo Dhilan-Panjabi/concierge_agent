@@ -44,6 +44,7 @@ RUN playwright install-deps chromium
 RUN echo "USE_WEBHOOK=true" > .env && \
     echo "WEBHOOK_PATH=/telegram/webhook" >> .env && \
     echo "PORT=8443" >> .env && \
+    echo "WEBHOOK_URL=https://railway-service.up.railway.app" >> .env && \
     echo "BROWSER_HEADLESS=true" >> .env && \
     echo "BROWSER_BROWSERLESS=true" >> .env && \
     echo "GPT_MODEL=gpt-4o" >> .env && \
@@ -67,6 +68,7 @@ ENV DISABLE_GIF_CREATION=true
 ENV RAILWAY_ENVIRONMENT=production
 ENV USE_WEBHOOK=true
 ENV PORT=8080
+ENV WEBHOOK_URL=https://railway-service.up.railway.app
 
 # Explicitly expose ports
 # Port 8080 for health checks and the main app

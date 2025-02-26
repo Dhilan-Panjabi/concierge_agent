@@ -56,11 +56,12 @@ server_thread.start()
 time.sleep(2)
 logger.info("Health check server should be running now")
 
-# Update .env file with WEBHOOK_URL if RAILWAY_PUBLIC_DOMAIN is available
+# Set USE_WEBHOOK to false if RAILWAY_PUBLIC_DOMAIN is not available
 if "RAILWAY_PUBLIC_DOMAIN" in os.environ:
     webhook_url = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}"
     logger.info(f"Setting WEBHOOK_URL to {webhook_url}")
     os.environ["WEBHOOK_URL"] = webhook_url
+    os.environ["USE_WEBHOOK"] = "true"
     
     # Also update the .env file for persistence
     try:
@@ -70,7 +71,33 @@ if "RAILWAY_PUBLIC_DOMAIN" in os.environ:
     except Exception as e:
         logger.error(f"Error updating .env file: {str(e)}")
 else:
-    logger.warning("RAILWAY_PUBLIC_DOMAIN is not set, WEBHOOK_URL may not be configured properly")
+    # If RAILWAY_PUBLIC_DOMAIN is not set, we need to either:
+    # 1. Disable webhook mode, or
+    # 2. Set a default webhook URL
+    # Let's set a default webhook URL and keep webhook mode enabled
+    logger.warning("RAILWAY_PUBLIC_DOMAIN is not set, using a fallback URL")
+    fallback_url = "https://railway-service.up.railway.app"
+    logger.info(f"Setting fallback WEBHOOK_URL to {fallback_url}")
+    os.environ["WEBHOOK_URL"] = fallback_url
+    
+    # Update the .env file for persistence
+    try:
+        with open("/app/.env", "r") as env_file:
+            env_content = env_file.read()
+            
+        # Check if USE_WEBHOOK is true in the env file
+        if "USE_WEBHOOK=true" in env_content:
+            with open("/app/.env", "a") as env_file:
+                env_file.write(f"\nWEBHOOK_URL={fallback_url}\n")
+            logger.info("Updated .env file with fallback WEBHOOK_URL")
+    except Exception as e:
+        logger.error(f"Error updating .env file: {str(e)}")
+
+# Log all environment variables for debugging
+logger.info("Current environment variables:")
+for key, value in os.environ.items():
+    if key.startswith('WEBHOOK') or key.startswith('USE_') or key == 'RAILWAY_PUBLIC_DOMAIN':
+        logger.info(f"{key}={value}")
 
 # Start the main application
 logger.info("Starting main application...")

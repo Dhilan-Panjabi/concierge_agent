@@ -164,9 +164,10 @@ class Settings:
 
         # Add webhook URL validation only if webhook mode is enabled
         if self.USE_WEBHOOK and not self.WEBHOOK_URL:
-            error_msg = "WEBHOOK_URL is required when USE_WEBHOOK is enabled"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            # Instead of failing, set a default webhook URL for Railway deployments
+            default_url = "https://railway-service.up.railway.app"
+            logger.warning(f"WEBHOOK_URL not set. Using default URL: {default_url}")
+            self.WEBHOOK_URL = default_url
 
         for name, value in required_settings:
             if not value:

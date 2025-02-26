@@ -611,7 +611,7 @@ class BrowserService:
         # Initialize Claude LLM for browser use
         try:
             # Import and configure Claude for browser use
-            from browser_use import FunctionAgent, AgentConfig, BrowserConfig
+            from browser_use import Agent, AgentConfig, BrowserConfig
             from langchain_anthropic import ChatAnthropic
             
             # Initialize Claude LLM
@@ -1126,7 +1126,7 @@ class BrowserService:
         self.logger.info(f"Searching hotels with query: {query}, location: {location}, check_in: {check_in}, check_out: {check_out}")
         
         try:
-            from browser_use import FunctionAgent, AgentConfig
+            from browser_use import Agent, AgentConfig
             
             # Construct search URL
             search_term = f"{query} hotel {location}" if location else f"{query} hotel"
@@ -1139,7 +1139,7 @@ class BrowserService:
             self.logger.info(f"Creating browser agent for task: {task}")
             
             # Create agent
-            agent = FunctionAgent.create_browser(
+            agent = Agent.create_browser(
                 llm=self.claude_llm,
                 browser_config=self.browser_config_obj,
                 agent_config=AgentConfig(
@@ -1177,7 +1177,7 @@ class BrowserService:
         self.logger.info(f"Searching restaurants with location: {location}, cuisine: {cuisine}, price_range: {price_range}")
         
         try:
-            from browser_use import FunctionAgent, AgentConfig
+            from browser_use import Agent, AgentConfig
             
             # Construct search query
             search_term = f"best restaurants in {location}"
@@ -1192,7 +1192,7 @@ class BrowserService:
             self.logger.info(f"Creating browser agent for restaurant task: {task}")
             
             # Create agent
-            agent = FunctionAgent.create_browser(
+            agent = Agent.create_browser(
                 llm=self.claude_llm,
                 browser_config=self.browser_config_obj,
                 agent_config=AgentConfig(

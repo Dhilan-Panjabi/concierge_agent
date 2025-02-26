@@ -302,66 +302,71 @@ class BookingBot:
                     webhook_port = webhook_config['webhook_port']
                     webhook_path = webhook_config['webhook_path']
                     
+                    # Log webhook and health check server ports for debugging
+                    logger.info(f"Webhook configuration: URL={webhook_url}, Port={webhook_port}, Path={webhook_path}")
+                    logger.info(f"Health check server is running: {health_check_server_running}")
+                    logger.info(f"Environment PORT value: {os.environ.get('PORT', 'Not set')}")
+                    
                     if not webhook_url:
                         logger.error("WEBHOOK_URL is required for webhook mode")
                         sys.exit(1)
                     
-                    # Start health check server on the same port as the webhook
-                    # health_check_server = self.start_health_check_server(port=8080)
+                    # Since we're on Railway with health check server already running,
+                    # We'll use polling mode but maintain the webhook URL for external access
+                    logger.info("Running on Railway with health check server. Using polling mode instead of webhook.")
                     
-                    # Configure webhook
-                    webhook_url = f"{webhook_url}{webhook_path}"
-                    logger.info(f"Starting bot in webhook mode at {webhook_url} on port {webhook_port}")
-                    
-                    # Register shutdown handler for graceful termination
+                    # Configure signals for graceful shutdown
                     import signal
                     
                     # Define signal handlers for graceful shutdown
                     async def signal_handler():
                         logger.info("Received termination signal, shutting down...")
-                        # if health_check_server:
-                        #     health_check_server.shutdown()
                         await self.shutdown()
                     
                     # Register signal handlers
-                    self.application.add_signal_handler(signal.SIGINT, signal_handler)
-                    self.application.add_signal_handler(signal.SIGTERM, signal_handler)
+                    loop = asyncio.get_running_loop()
+                    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(signal_handler()))
+                    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(signal_handler()))
                     
-                    # Start the application
+                    # Start the application in polling mode
+                    await self.application.initialize()
                     await self.application.start()
-                    await self.application.update_bot()
                     
-                    # Add a custom webhook handler that also serves as a health check
-                    from telegram.ext import CommandHandler
-                    
-                    # Define a simple health check handler
-                    async def health_check_handler(update, context):
-                        if update is None:  # Direct HTTP request
-                            return True  # Return success for health checks
-                        else:  # Telegram update
-                            await update.message.reply_text("Bot is running!")
-                            return True
-                    
-                    # Register the health check handler
-                    self.application.add_handler(CommandHandler("healthcheck", health_check_handler))
-                    
-                    # Setup the webhook
-                    await self.application.setup_webhook(
-                        listen="0.0.0.0",
-                        port=webhook_port,
-                        url_path=webhook_path,
-                        webhook_url=webhook_url
-                    )
-                    
-                    # Start the webhook
-                    await self.application.start_webhook(
-                        drop_pending_updates=True,
-                        allowed_updates=["message", "callback_query"]
-                    )
+                    # Use get_updates method to poll for updates
+                    logger.info("Starting to poll for updates...")
+                    offset = 0
                     
                     # Keep the app running
                     while True:
-                        await asyncio.sleep(3600)  # Sleep for an hour
+                        try:
+                            # Get updates from Telegram
+                            updates = await self.application.bot.get_updates(offset=offset, timeout=30)
+                            
+                            # Process each update
+                            for update in updates:
+                                try:
+                                    # Update offset to acknowledge this update
+                                    offset = update.update_id + 1
+                                    
+                                    # Process the update
+                                    await self.application.process_update(update)
+                                except Exception as update_error:
+                                    # Log the error but continue processing other updates
+                                    logger.error(f"Error processing update {update.update_id}: {update_error}", exc_info=True)
+                                    # Try to handle with the error handler if possible
+                                    try:
+                                        context = CallbackContext.from_error(update, update_error, self.application)
+                                        await self.error_handler(update, context)
+                                    except Exception as handler_error:
+                                        logger.error(f"Error in error handler: {handler_error}", exc_info=True)
+                            
+                            # If no updates, sleep briefly
+                            if not updates:
+                                await asyncio.sleep(1)
+                                
+                        except Exception as e:
+                            logger.error(f"Error processing updates: {e}", exc_info=True)
+                            await asyncio.sleep(5)  # Wait before retrying
                 else:
                     # Start the bot in polling mode
                     logger.info("Starting bot in polling mode...")

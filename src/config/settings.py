@@ -30,6 +30,7 @@ class Settings:
         self.OPENAI_API_KEY: str = self._get_env('OPENAI_API_KEY')
         self.DEEPSEEK_API_KEY: str = self._get_env('DEEPSEEK_API_KEY')
         self.STEEL_API_KEY: str = self._get_env('STEEL_API_KEY')
+        self.OPENROUTER_API_KEY: str = self._get_env('OPENROUTER_API_KEY')
 
         # Browser settings
         self.BROWSER_HEADLESS: bool = self._get_env_bool(
@@ -45,6 +46,8 @@ class Settings:
         self.GPT_MODEL: str = self._get_env('GPT_MODEL', 'gpt-4o')
         self.DEEPSEEK_MODEL: str = self._get_env(
             'DEEPSEEK_MODEL', 'deepseek-reasoner')
+        self.CLAUDE_MODEL: str = self._get_env(
+            'CLAUDE_MODEL', 'anthropic/claude-3-7-sonnet-20250219')
 
         # Initialize AI models
         self.deepseek_llm = self._initialize_deepseek()
@@ -150,6 +153,7 @@ class Settings:
             ('STEEL_API_KEY', self.STEEL_API_KEY),
             ('SUPABASE_URL', self.SUPABASE_URL),
             ('SUPABASE_KEY', self.SUPABASE_KEY),
+            ('OPENROUTER_API_KEY', self.OPENROUTER_API_KEY),
         ]
 
         for name, value in required_settings:

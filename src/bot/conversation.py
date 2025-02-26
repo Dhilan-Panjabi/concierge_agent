@@ -214,11 +214,12 @@ class ConversationManager:
             await update.message.reply_text("Processing your booking...")
             result = await self.message_handler.browser_service.execute_search(
                 booking_instruction,
-                task_type="booking"
+                task_type="booking",
+                user_id=user_id
             )
 
-            # Format and send response
-            response = await self.message_handler.ai_service.format_response("Make booking", result)
+            # Format and send response with user context
+            response = await self.message_handler.ai_service.format_response("Make booking", result, user_id)
             await self.message_utils.send_long_message(update, response)
 
             # Clear booking info

@@ -64,62 +64,83 @@ class AIService:
             logger.error(f"Error classifying intent: {e}", exc_info=True)
             return "2"  # Default to search intent on error
 
-    async def format_response(self, user_request: str, agent_result: str) -> str:
+    async def format_response(self, user_request: str, agent_result: str, user_id: int = 1) -> str:
         """
         Formats the agent's result into a user-friendly response.
         
         Args:
             user_request: Original user request
             agent_result: Result from browser agent
+            user_id: User identifier for retrieving conversation context
             
         Returns:
             str: Formatted response
         """
         try:
+            # Get conversation history for context
+            history = await self._get_user_history(user_id)
+            context = self._format_history_context(history)
+            
+            # Check if this is an availability search response that should offer booking
+            is_availability_search = any(term in user_request.lower() for term in 
+                ['available', 'availability', 'reservation', 'book', 'free', 'slot'])
+            has_booking_link = 'http' in agent_result and any(domain in agent_result.lower() for domain in 
+                ['opentable', 'resy', 'bookatable', 'sevenrooms', 'tock'])
+            
+            # Special instructions for availability responses
+            booking_instruction = ""
+            if is_availability_search and has_booking_link:
+                booking_instruction = """
+                IMPORTANT BOOKING FLOW REQUIREMENTS:
+                1. Make sure to clearly include the DIRECT BOOKING LINK in your response
+                2. End your response by explicitly offering to book on behalf of the user with text like:
+                   "Would you like me to book a table for you? Just let me know which time works best!"
+                3. If the user has previously saved their details, mention that you'll use those details
+                """
+            
             prompt = f"""
-            USER REQUEST: {user_request}
+            {context}
+            
+            CURRENT USER REQUEST: {user_request}
             
             SEARCH RESULTS: {agent_result}
             
+            {booking_instruction}
+            
             FORMAT GUIDELINES:
-            1. Structure the response clearly with sections:
-               - Hotel Overview (maintain focus on the specific hotel mentioned in the request)
-               - Room Availability for the requested dates
-               - Room Types & Current Rates
-               - Special Offers (if any)
-               - Booking Conditions
+            1. Response Style:
+               - Write like you're texting a friend - casual and conversational
+               - Use a friendly tone with occasional emojis where appropriate
+               - Keep sentences shorter like in text messages
+               - Use contractions (don't, I'll, there's)
             
-            2. For each room type include:
-               - Room name/category
-               - Current rate per night in the local currency (EUR for Milan hotels)
-               - Room features and amenities
-               - Available dates
-               - Any restrictions or minimum stay requirements
+            2. Content Structure:
+               - Start with a brief overview of availability
+               - Mention 2-3 room options with prices
+               - Note any special deals or important policies
+               - Include booking info but keep it brief
+               - ALWAYS include any booking links that are in the search results
             
-            3. Additional Information:
-               - Highlight any special packages or deals
-               - Note any included amenities (breakfast, parking, etc.)
-               - Mention cancellation policy
-               - Include check-in/check-out times
+            3. Formatting:
+               - Avoid formal bullet points or numbered lists
+               - Use natural breaks between topics
+               - Bold only the most essential info (like prices)
+               - Keep paragraphs short - 1-3 sentences max
             
-            4. Formatting:
-               - Use bullet points for better readability
-               - Bold important information (prices, dates)
-               - Keep URLs and contact information intact
-               - Maintain a professional yet friendly tone
-            
-            5. End with:
-               - Direct booking link or contact information
-               - Any required deposits or additional fees
-               - Special notes about the location or current events in the area
+            4. End with:
+               - A simple question to continue the conversation
+               - If this is an availability check, offer to book on their behalf
             
             IMPORTANT: 
-            - Focus ONLY on the specific hotel and location mentioned in the user request
-            - Ensure all prices are in the correct local currency
-            - If the search results don't match the requested hotel/location, indicate that there might be an error
+            - Make it feel like a helpful friend texting, not a formal report
+            - Include accurate pricing and availability from the search results
+            - Don't use formal headers or sections
+            - MAINTAIN CONTEXT from previous conversation - if the user is asking about "the third place" or "that hotel", 
+              use the conversation history to determine which specific place they're referring to
+            - If there are any booking links in the search results, ALWAYS include them in your response
             
-            Keep the response clear, accurate, and focused on the specific hotel and dates requested.
-            Include all pricing and availability information exactly as provided."""
+            Overall, make your response feel like a text message conversation while still including the key information.
+            """
 
             response = await self._get_ai_response(prompt)
             return response.strip()
@@ -184,35 +205,49 @@ class AIService:
         )
         return context
 
-    async def get_recommendations(self, query: str) -> str:
+    async def get_recommendations(self, query: str, user_id: int) -> str:
         """
         Gets recommendations using GPT without browser automation.
         
         Args:
             query: User query for recommendations
+            user_id: User identifier for retrieving conversation context
             
         Returns:
             str: Formatted recommendations
         """
         try:
+            # Get conversation history for context
+            history = await self._get_user_history(user_id)
+            context = self._format_history_context(history)
+
             prompt = f"""
-            You are a knowledgeable travel and hospitality assistant. The user is asking for recommendations.
+            {context}
             
-            USER REQUEST: "{query}"
+            Current request: "{query}"
             
-            Provide detailed recommendations following these guidelines:
-            1. Suggest 3-4 specific options
-            2. For each option include:
-               - Name and brief description
-               - Price range ($, $$, $$$, $$$$)
-               - Known for / Highlights
-               - Location/Area
-               - Best for (type of traveler/occasion)
-            3. Keep the tone friendly and conversational
-            4. Format with clear sections and bullet points
-            5. End with a note offering to check real-time availability
+            You are a friendly booking assistant texting with a user. The user is asking for recommendations.
             
-            Focus on providing accurate, helpful information without real-time data.
+            IMPORTANT: Use the conversation CONTEXT above to maintain continuity. If the user previously mentioned a location 
+            and is now just specifying a cuisine type or activity, ALWAYS recommend places in the previously mentioned location.
+            
+            For example, if they first asked about restaurants in Boston, and then said "I'm more in the mood for Japanese", 
+            you should recommend Japanese restaurants in Boston, not in any other city.
+            
+            Provide casual, conversational recommendations as if you're texting a friend. Follow these guidelines:
+            1. Keep it brief but informative (like a text message)
+            2. Use a casual, friendly tone with occasional emojis
+            3. For each option include only the most essential details:
+               - Name
+               - Quick 1-line description
+               - Price ($ to $$$$)
+               - 1-2 standout features
+               - Location (ensuring it matches the context of the conversation)
+            4. Don't use formal formatting like bullet points or sections
+            5. Use natural texting language (shorter sentences, contractions, etc.)
+            6. End with a quick question to keep the conversation going
+            
+            Make sure your response reads like a text message from a knowledgeable friend rather than a formal recommendation.
             """
 
             response = await self._get_ai_response(prompt)
@@ -220,4 +255,4 @@ class AIService:
 
         except Exception as e:
             logger.error(f"Error getting recommendations: {e}", exc_info=True)
-            return "I apologize, but I encountered an error while getting recommendations. Please try again."
+            return "Sorry, I hit a snag getting those recommendations. Mind trying again?"

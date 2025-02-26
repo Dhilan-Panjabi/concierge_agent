@@ -315,6 +315,16 @@ class BookingBot:
                     # We'll use polling mode but maintain the webhook URL for external access
                     logger.info("Running on Railway with health check server. Using polling mode instead of webhook.")
                     
+                    # Check if this is a multi-instance deployment on Railway
+                    railway_instance_id = os.environ.get('RAILWAY_REPLICA_ID')
+                    railway_service_id = os.environ.get('RAILWAY_SERVICE_ID')
+                    
+                    logger.info(f"Railway instance info - Replica ID: {railway_instance_id}, Service ID: {railway_service_id}")
+                    
+                    # Only the first instance (or if RAILWAY_REPLICA_ID is not set) should poll for updates
+                    is_primary_instance = not railway_instance_id or railway_instance_id == '0'
+                    logger.info(f"Is primary instance that should poll for updates: {is_primary_instance}")
+                    
                     # Configure signals for graceful shutdown
                     import signal
                     
@@ -332,41 +342,64 @@ class BookingBot:
                     await self.application.initialize()
                     await self.application.start()
                     
-                    # Use get_updates method to poll for updates
-                    logger.info("Starting to poll for updates...")
-                    offset = 0
+                    # Delete any existing webhook before starting polling
+                    logger.info("Deleting any existing webhook before starting polling")
+                    await self.application.bot.delete_webhook()
                     
-                    # Keep the app running
-                    while True:
-                        try:
-                            # Get updates from Telegram
-                            updates = await self.application.bot.get_updates(offset=offset, timeout=30)
-                            
-                            # Process each update
-                            for update in updates:
-                                try:
-                                    # Update offset to acknowledge this update
-                                    offset = update.update_id + 1
-                                    
-                                    # Process the update
-                                    await self.application.process_update(update)
-                                except Exception as update_error:
-                                    # Log the error but continue processing other updates
-                                    logger.error(f"Error processing update {update.update_id}: {update_error}", exc_info=True)
-                                    # Try to handle with the error handler if possible
-                                    try:
-                                        context = CallbackContext.from_error(update, update_error, self.application)
-                                        await self.error_handler(update, context)
-                                    except Exception as handler_error:
-                                        logger.error(f"Error in error handler: {handler_error}", exc_info=True)
-                            
-                            # If no updates, sleep briefly
-                            if not updates:
-                                await asyncio.sleep(1)
+                    # Check if there are multiple instances running
+                    try:
+                        # Get webhook info to check if another instance has set a webhook
+                        webhook_info = await self.application.bot.get_webhook_info()
+                        if webhook_info.url:
+                            logger.warning(f"Another instance has set a webhook at {webhook_info.url}. This instance will not poll for updates.")
+                            # Just keep the application alive without polling
+                            while True:
+                                await asyncio.sleep(60)
+                    except Exception as e:
+                        logger.error(f"Error checking webhook info: {e}", exc_info=True)
+                    
+                    # Only poll for updates on the primary instance
+                    if is_primary_instance:
+                        # Use get_updates method to poll for updates
+                        logger.info("Starting to poll for updates on primary instance...")
+                        offset = 0
+                        
+                        # Keep the app running
+                        while True:
+                            try:
+                                # Get updates from Telegram
+                                updates = await self.application.bot.get_updates(offset=offset, timeout=30)
                                 
-                        except Exception as e:
-                            logger.error(f"Error processing updates: {e}", exc_info=True)
-                            await asyncio.sleep(5)  # Wait before retrying
+                                # Process each update
+                                for update in updates:
+                                    try:
+                                        # Update offset to acknowledge this update
+                                        offset = update.update_id + 1
+                                        
+                                        # Process the update
+                                        await self.application.process_update(update)
+                                    except Exception as update_error:
+                                        # Log the error but continue processing other updates
+                                        logger.error(f"Error processing update {update.update_id}: {update_error}", exc_info=True)
+                                        # Try to handle with the error handler if possible
+                                        try:
+                                            context = CallbackContext.from_error(update, update_error, self.application)
+                                            await self.error_handler(update, context)
+                                        except Exception as handler_error:
+                                            logger.error(f"Error in error handler: {handler_error}", exc_info=True)
+                                
+                                # If no updates, sleep briefly
+                                if not updates:
+                                    await asyncio.sleep(1)
+                                    
+                            except Exception as e:
+                                logger.error(f"Error processing updates: {e}", exc_info=True)
+                                await asyncio.sleep(5)  # Wait before retrying
+                    else:
+                        # Non-primary instances should just stay alive for health checks but not poll
+                        logger.info("This is not the primary instance. Health check server active, but not polling for updates.")
+                        while True:
+                            await asyncio.sleep(60)  # Just keep the process alive
                 else:
                     # Start the bot in polling mode
                     logger.info("Starting bot in polling mode...")

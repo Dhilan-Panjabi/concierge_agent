@@ -30,8 +30,13 @@ class Settings:
         self.USE_WEBHOOK: bool = self._get_env_bool('USE_WEBHOOK', False)
         self.WEBHOOK_URL: Optional[str] = os.getenv('WEBHOOK_URL')
         self.WEBHOOK_PORT: int = self._get_env_int('PORT', 8443)
-        self.WEBHOOK_PATH: str = self._get_env('WEBHOOK_PATH', '')
+        self.WEBHOOK_PATH: str = self._get_env('WEBHOOK_PATH', '/telegram/webhook')
         
+        # Railway specific settings
+        self.RAILWAY_SERVICE_ID: Optional[str] = os.getenv('RAILWAY_SERVICE_ID')
+        self.RAILWAY_REPLICA_ID: Optional[str] = os.getenv('RAILWAY_REPLICA_ID')
+        self.IS_PRIMARY_INSTANCE: bool = not self.RAILWAY_REPLICA_ID or self.RAILWAY_REPLICA_ID == '0'
+
         # API Keys
         self.OPENAI_API_KEY: str = self._get_env('OPENAI_API_KEY')
         self.DEEPSEEK_API_KEY: Optional[str] = os.getenv('DEEPSEEK_API_KEY', '')

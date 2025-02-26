@@ -49,14 +49,11 @@ class MessageHandler:
 
             # Show greeting only for the very first message
             if await self.message_utils.should_show_greeting(user_id):
-                greeting = """Hey! I'm your booking assistant. 👋
+                greeting = """Hey there! 👋 I'm your booking assistant.
 
-I can help you with:
-• Restaurant recommendations 🍽️
-• Checking availability 📅
-• Making reservations ✅
+I can help you find restaurants 🍽️, check what's available 📅, and make reservations ✅
 
-What would you like to do?"""
+What can I help you with today?"""
                 await update.message.reply_text(greeting)
                 # Store the greeting in history to avoid showing it again
                 await self.message_utils.add_to_history(user_id, "assistant", greeting)
@@ -64,7 +61,7 @@ What would you like to do?"""
 
             # Convert to lowercase for processing
             user_message = user_message.lower()
-            
+
             # Store message in history
             await self.message_utils.add_to_history(user_id, "user", user_message)
 
@@ -141,7 +138,7 @@ What would you like to do?"""
         """Handles recommendation-related intents using GPT first"""
         try:
             # First, get AI recommendations without browser
-            initial_response = await self.ai_service.get_recommendations(user_message)
+            initial_response = await self.ai_service.get_recommendations(user_message, user_id)
             await self.message_utils.send_long_message(update, initial_response)
 
             # Store in history
@@ -164,72 +161,58 @@ What would you like to do?"""
     async def handle_search_intent(self, update: Update, user_message: str, user_id: int, context: CallbackContext) -> int:
         """Handles search-related intents requiring real-time data"""
         try:
-            await update.message.reply_text("Let me check real-time availability...")
+            await update.message.reply_text("Let me check that for you...")
 
-            # Get conversation history to build context
+            # Get the complete conversation history for context
             history = await self.message_utils.get_user_history(user_id)
             
-            # Build context from history, focusing on most recent messages
-            search_context = {
-                'hotel': None,
-                'location': None,
-                'check_in': None,
-                'check_out': None
-            }
-            
-            # Extract context from recent history (last 3 messages)
-            recent_history = history[-3:]
-            for msg in reversed(recent_history):  # Process from most recent to older
-                content = msg['content'].lower()
-                
-                # Look for hotel mentions in the most recent context
-                if 'hotel principe di savoia' in content.lower():
-                    search_context['hotel'] = 'Hotel Principe di Savoia'
-                    search_context['location'] = 'Milan, Italy'
-                elif 'bulgari hotel milano' in content.lower():
-                    search_context['hotel'] = 'Bulgari Hotel Milano'
-                    search_context['location'] = 'Milan, Italy'
-                elif 'excelsior hotel gallia' in content.lower():
-                    search_context['hotel'] = 'Excelsior Hotel Gallia'
-                    search_context['location'] = 'Milan, Italy'
-                elif 'mandarin oriental, milan' in content.lower():
-                    search_context['hotel'] = 'Mandarin Oriental'
-                    search_context['location'] = 'Milan, Italy'
-
-            # Parse dates from the current message
+            # Extract dates from the current message for context
+            check_in_date = None
+            check_out_date = None
             if 'next weekend' in user_message.lower():
                 from datetime import datetime, timedelta
                 today = datetime.now()
                 days_until_saturday = (5 - today.weekday()) % 7 + 7  # Get next Saturday
                 next_saturday = today + timedelta(days=days_until_saturday)
                 next_sunday = next_saturday + timedelta(days=1)
-                search_context['check_in'] = next_saturday.strftime('%Y-%m-%d')
-                search_context['check_out'] = next_sunday.strftime('%Y-%m-%d')
+                check_in_date = next_saturday.strftime('%Y-%m-%d')
+                check_out_date = next_sunday.strftime('%Y-%m-%d')
+            elif 'this weekend' in user_message.lower():
+                from datetime import datetime, timedelta
+                today = datetime.now()
+                days_until_saturday = (5 - today.weekday()) % 7  # Get this Saturday
+                this_saturday = today + timedelta(days=days_until_saturday)
+                this_sunday = this_saturday + timedelta(days=1)
+                check_in_date = this_saturday.strftime('%Y-%m-%d')
+                check_out_date = this_sunday.strftime('%Y-%m-%d')
+            elif 'tomorrow' in user_message.lower():
+                from datetime import datetime, timedelta
+                tomorrow = datetime.now() + timedelta(days=1)
+                check_in_date = tomorrow.strftime('%Y-%m-%d')
+            
+            # Use the user's exact search query to avoid losing context
+            search_query = user_message
+            
+            # For reference requests like "the third one" or "first option", conversation context is critical
+            reference_indicators = ["first", "second", "third", "1st", "2nd", "3rd", "that one", "last one"]
+            is_reference_request = any(indicator in user_message.lower() for indicator in reference_indicators)
+            
+            if is_reference_request:
+                logger.info("Reference request detected - using full conversation context")
+            
+            # Execute browser search with the query and conversation history - PASS USER_ID
+            logger.info(f"Executing search with query: {search_query}")
+            result = await self.browser_service.execute_search(search_query, "search", user_id)
+            response = await self.ai_service.format_response(search_query, result, user_id)
 
-            # Build a detailed search query
-            if search_context['hotel'] and search_context['location']:
-                search_query = f"Check availability and pricing for {search_context['hotel']} in {search_context['location']} "
-                if search_context['check_in'] and search_context['check_out']:
-                    search_query += f"from {search_context['check_in']} to {search_context['check_out']}. "
-                search_query += "Include room types, rates, and amenities."
-            else:
-                # If no specific hotel found in context, use the original message
-                search_query = user_message
-
-            # Execute browser search with detailed query
-            result = await self.browser_service.execute_search(search_query)
-            response = await self.ai_service.format_response(search_query, result)
-
-            # Store search context in user data
+            # Store search context in user data for potential booking
             if 'context' not in context.user_data:
                 context.user_data['context'] = {}
             context.user_data['context']['last_search'] = {
                 'query': search_query,
                 'result': response,
-                'hotel': search_context['hotel'],
-                'location': search_context['location'],
-                'check_in': search_context['check_in'],
-                'check_out': search_context['check_out']
+                'check_in': check_in_date,
+                'check_out': check_out_date
             }
 
             # Send response
@@ -259,7 +242,7 @@ What would you like to do?"""
         else:
             await update.message.reply_text("Keeping the browser session active. You can continue searching!")
         
-        return ConversationHandler.END
+            return ConversationHandler.END
 
     @staticmethod
     async def handle_error(update: Update, user_id: int) -> None:
@@ -286,62 +269,204 @@ What would you like to do?"""
         await update.message.reply_text(booking_options)
 
     async def start_booking_flow(self, update: Update, context: CallbackContext) -> int:
-        """Starts the booking information collection flow"""
+        """Initiates the booking flow after availability check"""
         try:
             user_id = update.message.from_user.id
-            current_message = update.message.text.lower()
+            user_message = update.message.text.strip()
             
-            # Get the last search context
-            last_search = context.user_data.get('context', {}).get('last_search', {})
-            search_query = last_search.get('query', '')
-            search_result = last_search.get('result', '')
-
-            # Extract restaurant and time information
-            booking_details = {
-                'restaurant': None,
-                'time': None,
-                'party_size': None
-            }
-
-            # Try to extract from search query
-            if "oishii" in search_query.lower():
-                booking_details['restaurant'] = "Oishii Boston"
-            if "people" in search_query.lower():
-                try:
-                    party_size = int(''.join(filter(str.isdigit, search_query)))
-                    booking_details['party_size'] = party_size
-                except ValueError:
-                    pass
-
-            # Try to extract from current message
-            if "8pm" in current_message or "8:00" in current_message:
-                booking_details['time'] = "8:00 PM"
-            elif "8:30" in current_message or "830" in current_message:
-                booking_details['time'] = "8:30 PM"
+            # Initialize booking context if it doesn't exist
+            if 'booking_context' not in context.user_data:
+                context.user_data['booking_context'] = {}
             
-            # Store the booking context
-            context.user_data['booking_context'] = {
-                'restaurant': booking_details['restaurant'],
-                'time': booking_details['time'],
-                'party_size': booking_details['party_size'],
-                'original_search': search_query,
-                'current_request': current_message
-            }
+            # Analyze recent conversation history to extract booking details
+            history = await self.message_utils.get_user_history(user_id)
             
-            # Initialize booking step
-            context.user_data['booking_step'] = 0
+            # Look for most recent availability message
+            availability_info = {}
+            restaurant_name = None
+            available_times = []
+            party_size = None
+            booking_date = None
             
-            await update.message.reply_text("To proceed with the booking, I'll need some details. What's your name?")
-            return NAME
+            logger.info(f"Starting booking flow for user {user_id} with message: {user_message}")
+            
+            # First, extract from bot's last response about availability
+            for msg in reversed(history):
+                if msg['role'] == 'assistant':
+                    content = msg['content'].lower()
+                    
+                    # Extract restaurant name
+                    if not restaurant_name:
+                        import re
+                        restaurant_match = re.search(r'checked ([^,]+) for', content)
+                        if restaurant_match:
+                            restaurant_name = restaurant_match.group(1).strip()
+                            logger.info(f"Extracted restaurant: {restaurant_name}")
+                        
+                        # Alternative pattern (they have slots available)
+                        if not restaurant_name:
+                            restaurant_match = re.search(r'at ([^,]+) (?:and|for|have|has)', content)
+                            if restaurant_match:
+                                restaurant_name = restaurant_match.group(1).strip()
+                                logger.info(f"Extracted restaurant (alt pattern): {restaurant_name}")
+                    
+                    # Extract times
+                    if not available_times:
+                        # Look for typical time patterns in the bot's response
+                        time_patterns = [
+                            r'(\d+:\d+\s*[ap]m)', # 7:30pm
+                            r'(\d+\s*[ap]m)',     # 7pm
+                            r'at (\d+(?:[:\.]\d+)?)'  # at 7:30 or at 7
+                        ]
+                        
+                        for pattern in time_patterns:
+                            time_matches = re.findall(pattern, content, re.IGNORECASE)
+                            if time_matches:
+                                available_times.extend(time_matches)
+                                logger.info(f"Extracted available times: {time_matches}")
+                                break
+                    
+                    # Extract party size
+                    if not party_size:
+                        party_match = re.search(r'for (\d+) people', content)
+                        if party_match:
+                            party_size = party_match.group(1)
+                            logger.info(f"Extracted party size: {party_size}")
+                    
+                    # Extract date
+                    if not booking_date:
+                        # Look for common date patterns
+                        date_patterns = {
+                            'tomorrow': 1,
+                            'tonight': 0,
+                            'this evening': 0,
+                            'today': 0
+                        }
+                        
+                        for date_term, days_to_add in date_patterns.items():
+                            if date_term in content:
+                                from datetime import datetime, timedelta
+                                booking_date = (datetime.now() + timedelta(days=days_to_add)).strftime('%Y-%m-%d')
+                                logger.info(f"Extracted date from '{date_term}': {booking_date}")
+                                break
+                        
+                        # Try to find a day of week
+                        days_of_week = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+                        for i, day in enumerate(days_of_week):
+                            if day in content:
+                                from datetime import datetime, timedelta
+                                today = datetime.now()
+                                current_weekday = today.weekday()
+                                days_to_add = (i - current_weekday) % 7
+                                if days_to_add == 0:
+                                    days_to_add = 7  # Next week if today
+                                booking_date = (today + timedelta(days=days_to_add)).strftime('%Y-%m-%d')
+                                logger.info(f"Extracted date from day of week '{day}': {booking_date}")
+                                break
+                    
+                    # Break if we found the availability message
+                    if (restaurant_name and available_times) or ('available' in content and restaurant_name):
+                        break
+            
+            # Now check user message for specific time selection
+            selected_time = None
+            
+            # First check for explicit time in current message
+            import re
+            time_in_message = re.search(r'(\d+(?::\d+)?\s*[ap]m)', user_message, re.IGNORECASE)
+            if time_in_message:
+                selected_time = time_in_message.group(1)
+                logger.info(f"User specified time in message: {selected_time}")
+            else:
+                # Check if user mentioned a specific time from available times
+                for time in available_times:
+                    normalized_time = time.replace(':', '').replace(' ', '').lower()
+                    normalized_msg = user_message.replace(':', '').replace(' ', '').lower()
+                    if normalized_time in normalized_msg:
+                        selected_time = time
+                        logger.info(f"Matched time '{time}' in user message")
+                        break
+            
+            # Store extracted information
+            booking_context = context.user_data['booking_context']
+            if restaurant_name:
+                booking_context['restaurant'] = restaurant_name
+            if selected_time:
+                booking_context['time'] = selected_time
+            if party_size:
+                booking_context['party_size'] = party_size
+            if booking_date:
+                booking_context['date'] = booking_date
+            
+            # Get saved user profile
+            profile = await self.message_utils.get_user_profile(user_id)
+            has_profile = profile and all(profile.get(k) for k in ['name', 'email', 'phone'])
+            
+            # Check what information is still needed
+            missing_info = []
+            if not booking_context.get('restaurant'):
+                missing_info.append('restaurant name')
+            if not booking_context.get('time'):
+                if available_times:
+                    # User didn't specify which time they want from available options
+                    time_options = ", ".join(available_times)
+                    await update.message.reply_text(f"Which time would you prefer? Available slots are {time_options}.")
+                    return NAME  # Use NAME state to collect time preference
+                else:
+                    missing_info.append('preferred time')
+            if not booking_context.get('party_size'):
+                missing_info.append('number of people')
+            if not booking_context.get('date'):
+                missing_info.append('date')
+            
+            logger.info(f"Booking context: {booking_context}")
+            logger.info(f"Missing information: {missing_info}")
+            
+            # If user has profile, we don't need to ask for those details
+            if has_profile:
+                # Copy profile to booking info
+                for key, value in profile.items():
+                    await self.message_utils.set_booking_info(user_id, key, value)
+                
+                if missing_info:
+                    # Still need restaurant details
+                    missing_str = ", ".join(missing_info)
+                    await update.message.reply_text(f"I need a few more details to complete your booking. Please provide the {missing_str}.")
+                    return NAME  # Use NAME state to collect missing restaurant details
+                else:
+                    # We have all info needed
+                    confirmation = (
+                        f"Great! I'll book a table at {booking_context['restaurant']} for "
+                        f"{booking_context['party_size']} people on {booking_context['date']} at "
+                        f"{booking_context['time']}. I'll use your saved contact information."
+                    )
+                    await update.message.reply_text(confirmation)
+                    # Proceed with booking using saved profile
+                    return await self.make_booking(update, context)
+            else:
+                # User doesn't have profile, need to collect contact info
+                if missing_info:
+                    # First collect restaurant details
+                    missing_str = ", ".join(missing_info)
+                    await update.message.reply_text(f"I need some details for your booking. Please provide the {missing_str}.")
+                    return NAME
+                else:
+                    # Have restaurant details, need contact info
+                    await update.message.reply_text(
+                        f"Perfect! I'll book a table at {booking_context['restaurant']} for "
+                        f"{booking_context['party_size']} people on {booking_context['date']} at "
+                        f"{booking_context['time']}. Now I need your contact details. What's your name?"
+                    )
+                    return NAME
 
         except Exception as e:
-            logger.error(f"Error in start_booking_flow: {e}", exc_info=True)
-            await self.handle_error(update, update.message.from_user.id)
+            logger.error(f"Error starting booking flow: {e}", exc_info=True)
+            await self.handle_error(update, user_id)
             return ConversationHandler.END
 
     async def handle_booking_info(self, update: Update, context: CallbackContext) -> int:
         """
-        Handles the collection of booking information.
+        Handles booking information collection (either restaurant details or contact info).
         
         Args:
             update: Telegram update object
@@ -353,70 +478,316 @@ What would you like to do?"""
         try:
             user_id = update.message.from_user.id
             message = update.message.text
-            current_step = context.user_data.get('booking_step', 0)
+            booking_context = context.user_data.get('booking_context', {})
             
-            # Define field names and their corresponding states
-            fields = ['name', 'email', 'phone']
-            next_states = [EMAIL, PHONE, CONFIRMATION_CODE]
-            next_prompts = [
-                "Great! Now, what's your email?",
-                "Perfect! And your phone number?",
-                "Thanks! I'll now proceed with the booking."
-            ]
-
-            # Store the current input using MessageUtils
-            await self.message_utils.set_booking_info(user_id, fields[current_step], message)
-
-            # Move to next step
-            next_step = current_step + 1
-            context.user_data['booking_step'] = next_step
-
-            if next_step < len(fields):
-                # If there are more fields to collect
-                await update.message.reply_text(next_prompts[current_step])
-                return next_states[current_step]
+            logger.info(f"Handling booking info for user {user_id}. Message: {message}")
+            
+            # Check if we're collecting restaurant details or contact info
+            # First check if we have all restaurant details
+            has_restaurant_details = all(key in booking_context for key in ['restaurant', 'time', 'party_size', 'date'])
+            
+            if not has_restaurant_details:
+                # We're collecting missing restaurant details
+                logger.info(f"Collecting missing restaurant details. Current context: {booking_context}")
+                
+                # First check if this is a time selection from available options
+                if not booking_context.get('time') and booking_context.get('restaurant'):
+                    import re
+                    # Try to extract time from message - this is likely responding to our "which time?" question
+                    time_pattern = re.search(r'(\d+(?::\d+)?\s*[ap]m)', message.lower())
+                    if time_pattern:
+                        booking_context['time'] = time_pattern.group(1)
+                        logger.info(f"Extracted time selection: {booking_context['time']}")
+                    else:
+                        # Try common time references
+                        time_references = {
+                            'earliest': 0,  # first available
+                            'first': 0,
+                            'second': 1,
+                            'third': 2,
+                            'last': -1,  # last available
+                            'latest': -1
+                        }
+                        
+                        # Get available times from context
+                        available_times = []
+                        history = await self.message_utils.get_user_history(user_id)
+                        for msg in reversed(history[:15]):  # Check last 15 messages
+                            if msg['role'] == 'assistant' and 'available' in msg['content'].lower():
+                                import re
+                                # Try to extract times from this message
+                                extracted_times = re.findall(r'(\d+:\d+\s*[ap]m|\d+\s*[ap]m)', msg['content'].lower())
+                                if extracted_times:
+                                    available_times = extracted_times
+                                    break
+                        
+                        # Find which time they meant by reference
+                        for ref, idx in time_references.items():
+                            if ref in message.lower() and available_times:
+                                selected_idx = idx if idx >= 0 else len(available_times) + idx
+                                if 0 <= selected_idx < len(available_times):
+                                    booking_context['time'] = available_times[selected_idx]
+                                    logger.info(f"Selected time by reference '{ref}': {booking_context['time']}")
+                                    break
+                
+                # Try to extract multiple pieces of information if first response
+                if len(booking_context) <= 1:
+                    logger.info("Attempting to extract multiple booking details from single message")
+                    import re
+                    
+                    # Try to extract restaurant name if not already have it
+                    if not booking_context.get('restaurant'):
+                        # Look for restaurant name patterns
+                        restaurant_patterns = [
+                            r'at\s+([^,\.]+)',  # at Restaurant Name
+                            r'to\s+([^,\.]+)',  # to Restaurant Name
+                            r'^([^,\.]+?)\s+(?:at|for|on)'  # Restaurant Name at/for/on
+                        ]
+                        
+                        for pattern in restaurant_patterns:
+                            restaurant_match = re.search(pattern, message)
+                            if restaurant_match:
+                                potential_name = restaurant_match.group(1).strip()
+                                # Skip if it's just a time or number
+                                if not re.match(r'^\d+(?::\d+)?\s*(?:am|pm)?$', potential_name, re.IGNORECASE):
+                                    booking_context['restaurant'] = potential_name
+                                    logger.info(f"Extracted restaurant name: {booking_context['restaurant']}")
+                                    break
+                    
+                    # Try to extract time if not already have it
+                    if not booking_context.get('time'):
+                        time_match = re.search(r'(\d+(?::\d+)?\s*[ap]m|\d+\s*[ap]m)', message.lower())
+                        if time_match:
+                            booking_context['time'] = time_match.group(1)
+                            logger.info(f"Extracted time: {booking_context['time']}")
+                    
+                    # Try to extract party size
+                    if not booking_context.get('party_size'):
+                        party_patterns = [
+                            r'(\d+)\s*people',  # 4 people
+                            r'(\d+)\s*persons?',  # 4 person(s)
+                            r'table\s*for\s*(\d+)',  # table for 4
+                            r'for\s*(\d+)'  # for 4
+                        ]
+                        
+                        for pattern in party_patterns:
+                            party_match = re.search(pattern, message.lower())
+                            if party_match:
+                                booking_context['party_size'] = party_match.group(1)
+                                logger.info(f"Extracted party size: {booking_context['party_size']}")
+                                break
+                    
+                    # Try to extract date
+                    if not booking_context.get('date'):
+                        date_keywords = {
+                            'tonight': 0,
+                            'today': 0,
+                            'tomorrow': 1,
+                            'day after tomorrow': 2
+                        }
+                        
+                        for keyword, days in date_keywords.items():
+                            if keyword in message.lower():
+                                from datetime import datetime, timedelta
+                                booking_date = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+                                booking_context['date'] = booking_date
+                                logger.info(f"Extracted date from '{keyword}': {booking_context['date']}")
+                                break
+                        
+                        # Look for day of week
+                        days_of_week = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+                        for i, day in enumerate(days_of_week):
+                            if day in message.lower():
+                                from datetime import datetime, timedelta
+                                today = datetime.now()
+                                current_weekday = today.weekday()
+                                days_to_add = (i - current_weekday) % 7
+                                if days_to_add == 0:
+                                    days_to_add = 7  # Next week if today
+                                booking_date = (today + timedelta(days=days_to_add)).strftime('%Y-%m-%d')
+                                booking_context['date'] = booking_date
+                                logger.info(f"Extracted date from day of week '{day}': {booking_context['date']}")
+                                break
+                
+                # Just handle a single missing field if there's only one missing
+                elif len([k for k in ['restaurant', 'time', 'party_size', 'date'] if k not in booking_context]) == 1:
+                    if not booking_context.get('restaurant'):
+                        booking_context['restaurant'] = message.strip()
+                        logger.info(f"Set restaurant name directly: {booking_context['restaurant']}")
+                    elif not booking_context.get('time'):
+                        booking_context['time'] = message.strip()
+                        logger.info(f"Set time directly: {booking_context['time']}")
+                    elif not booking_context.get('party_size'):
+                        # Take first word as number or try to extract number
+                        import re
+                        number_match = re.search(r'(\d+)', message)
+                        if number_match:
+                            booking_context['party_size'] = number_match.group(1)
+                        else:
+                            booking_context['party_size'] = message.strip().split()[0]
+                        logger.info(f"Set party size directly: {booking_context['party_size']}")
+                    elif not booking_context.get('date'):
+                        # Try to convert to date or use as is
+                        booking_context['date'] = message.strip()
+                        logger.info(f"Set date directly: {booking_context['date']}")
+                
+                # Check if we now have all restaurant details
+                has_restaurant_details = all(key in booking_context for key in ['restaurant', 'time', 'party_size', 'date'])
+                logger.info(f"Updated booking context: {booking_context}")
+                
+                if has_restaurant_details:
+                    # We have all restaurant details, check if we need contact info
+                    profile = await self.message_utils.get_user_profile(user_id)
+                    has_profile = profile and all(profile.get(k) for k in ['name', 'email', 'phone'])
+                    
+                    if has_profile:
+                        # Copy profile to booking info
+                        for key, value in profile.items():
+                            await self.message_utils.set_booking_info(user_id, key, value)
+                        
+                        # Confirm and proceed
+                        confirmation = (
+                            f"Great! I'll book a table at {booking_context['restaurant']} for "
+                            f"{booking_context['party_size']} people on {booking_context['date']} at "
+                            f"{booking_context['time']}. I'll use your saved contact information."
+                        )
+                        await update.message.reply_text(confirmation)
+                        return await self.make_booking(update, context)
+                    else:
+                        # Need contact info
+                        await update.message.reply_text("Perfect! Now I need your contact details. What's your name?")
+                        context.user_data['booking_step'] = 0  # Start contact info collection
+                        return NAME
+                else:
+                    # Still missing some restaurant details
+                    missing_info = []
+                    if not booking_context.get('restaurant'):
+                        missing_info.append('restaurant name')
+                    if not booking_context.get('time'):
+                        missing_info.append('preferred time')
+                    if not booking_context.get('party_size'):
+                        missing_info.append('number of people')
+                    if not booking_context.get('date'):
+                        missing_info.append('date')
+                    
+                    missing_str = ", ".join(missing_info)
+                    await update.message.reply_text(f"I still need the following details: {missing_str}")
+                    return NAME
             else:
-                # All information collected, proceed with booking
-                return await self.make_booking(update, context)
+                # We're collecting contact info
+                current_step = context.user_data.get('booking_step', 0)
+                
+                # Define field names and their corresponding states
+                fields = ['name', 'email', 'phone']
+                next_states = [EMAIL, PHONE, CONFIRMATION_CODE]
+                next_prompts = [
+                    "Great! Now, what's your email?",
+                    "Perfect! And your phone number?",
+                    "Thanks! I'll now proceed with the booking."
+                ]
+                
+                # Store the current input
+                await self.message_utils.set_booking_info(user_id, fields[current_step], message)
+                logger.info(f"Stored {fields[current_step]}: {message}")
+                
+                # Move to next step
+                next_step = current_step + 1
+                context.user_data['booking_step'] = next_step
+                
+                if next_step < len(fields):
+                    await update.message.reply_text(next_prompts[current_step])
+                    return next_states[current_step]
+                else:
+                    # All contact info collected
+                    return await self.make_booking(update, context)
 
         except Exception as e:
-            logger.error(f"Error in handle_booking_info: {e}", exc_info=True)
+            logger.error(f"Error handling booking info: {e}", exc_info=True)
             await self.handle_error(update, user_id)
             return ConversationHandler.END
 
     async def make_booking(self, update: Update, context: CallbackContext) -> int:
-        """
-        Makes the actual booking using collected information.
-        
-        Args:
-            update: Telegram update object
-            context: Callback context
-            
-        Returns:
-            int: Next conversation state
-        """
+        """Makes the actual booking using the browser service"""
         try:
             user_id = update.message.from_user.id
+            booking_context = context.user_data.get('booking_context', {})
             booking_info = await self.message_utils.get_booking_info(user_id)
-
-            # Execute the booking
-            await update.message.reply_text("Processing your booking...")
-            result = await self.browser_service.execute_search(
-                f"Book with details: {booking_info}",
-                task_type="booking"
+            
+            # Format details for the booking task
+            restaurant = booking_context.get('restaurant', 'the restaurant')
+            time = booking_context.get('time', '8:00 PM')
+            party_size = booking_context.get('party_size', '2')
+            date = booking_context.get('date', 'tomorrow')
+            
+            # Format date for human readability
+            readable_date = date
+            if date and date.startswith('202'):  # Looks like yyyy-mm-dd format
+                from datetime import datetime
+                try:
+                    date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    readable_date = date_obj.strftime('%A, %B %d')
+                except:
+                    pass  # Keep original if parsing fails
+            
+            # Create a detailed booking instruction with all available context
+            booking_instruction = (
+                f"Make a booking at {restaurant} for {party_size} people on {date} at {time}.\n\n"
+                f"Search for the restaurant's reservation page and complete the booking form with the user's information."
+                f"Do not ask for additional user information as all required details have been securely provided."
             )
-
-            # Format and send response
-            response = await self.ai_service.format_response("Make booking", result)
-            await self.message_utils.send_long_message(update, response)
-
+            
+            # Send a message indicating booking is in progress
+            await update.message.reply_text(
+                f"I'm booking your table at {restaurant} for {party_size} people on {readable_date} at {time}. "
+                f"This might take a minute..."
+            )
+            
+            # Ensure booking info contains all necessary contact details
+            name = booking_info.get('name', '')
+            email = booking_info.get('email', '')
+            phone = booking_info.get('phone', '')
+            
+            logger.info(f"Making booking with context: Restaurant={restaurant}, Date={date}, Time={time}, Party={party_size}")
+            logger.debug(f"Using contact info: Name={name}, Email={email}, Phone={phone[:4]}*** (partially masked)")
+            
+            # Execute the booking with task_type="booking" to ensure sensitive data is passed
+            result = await self.browser_service.execute_search(
+                booking_instruction,
+                task_type="booking",
+                user_id=user_id
+            )
+            
+            # Format and send response 
+            response = await self.ai_service.format_response(
+                "Confirm booking details", 
+                result, 
+                user_id
+            )
+            
+            # Prepare a user-friendly confirmation message
+            success_indicators = ["confirmed", "reservation complete", "booked successfully", "booking confirmed"]
+            is_successful = any(indicator in result.lower() for indicator in success_indicators)
+            
+            confirmation_message = (
+                f"Your table at {restaurant} is confirmed for {readable_date} at {time} for {party_size} people. "
+                f"You'll receive a confirmation email shortly!"
+            ) if is_successful else response
+            
+            await self.message_utils.send_long_message(update, confirmation_message)
+            
+            # Store the successful booking in history
+            await self.message_utils.add_to_history(user_id, "assistant", confirmation_message)
+            
             # Clear booking info
             await self.message_utils.clear_booking_info(user_id)
-            context.user_data['booking_step'] = 0
-
+            if 'booking_step' in context.user_data:
+                context.user_data['booking_step'] = 0
+            if 'booking_context' in context.user_data:
+                context.user_data.pop('booking_context')
+            
             return ConversationHandler.END
-
+            
         except Exception as e:
-            logger.error(f"Error in make_booking: {e}", exc_info=True)
+            logger.error(f"Error making booking: {e}", exc_info=True)
             await self.handle_error(update, user_id)
             return ConversationHandler.END

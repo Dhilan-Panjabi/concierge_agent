@@ -199,7 +199,12 @@ class BookingBot:
     async def initialize(self):
         """Async initialization for components that require an event loop"""
         try:
-            # Nothing to initialize asynchronously at the moment
+            # Log the bot username to confirm we're connected to the right bot
+            me = await self.application.bot.get_me()
+            logger.info(f"Bot connected successfully. Username: @{me.username}, ID: {me.id}")
+            logger.info("Bot is ready to receive messages")
+            
+            # Nothing else to initialize asynchronously at the moment
             # Browser will be initialized on first use
             pass
         except Exception as e:
@@ -211,14 +216,29 @@ class BookingBot:
         try:
             if update and update.effective_user:
                 user_id = update.effective_user.id
-                logger.error(f"Error for user {user_id}: {context.error}")
+                logger.error(f"Error for user {user_id}: {context.error}", exc_info=context.error)
+                
+                # Log more details about the update
+                update_type = None
+                if update.message:
+                    update_type = "message"
+                    content = update.message.text if update.message.text else "[non-text content]"
+                    logger.error(f"Error occurred while processing message: '{content}'")
+                elif update.callback_query:
+                    update_type = "callback_query" 
+                    content = update.callback_query.data
+                    logger.error(f"Error occurred while processing callback query: '{content}'")
+                
+                logger.error(f"Error details - Update ID: {update.update_id}, Type: {update_type}")
 
                 if isinstance(context.error, NetworkError):
                     await update.message.reply_text(ERROR_MESSAGES["timeout"])
                 else:
                     await update.message.reply_text(ERROR_MESSAGES["general"])
             else:
-                logger.error(f"Update caused error: {context.error}")
+                logger.error(f"Update caused error but no user information is available: {context.error}", exc_info=context.error)
+                if update:
+                    logger.error(f"Update ID: {update.update_id}, Update type: {type(update)}")
 
         except Exception as e:
             logger.error(f"Error in error handler: {e}", exc_info=True)
@@ -286,6 +306,18 @@ class BookingBot:
             self.application.add_handler(
                 TelegramCommandHandler("health", self.health_check)
             )
+            
+            # Add a simple diagnostic command
+            async def echo_command(update: Update, context: CallbackContext) -> None:
+                """Simple command to echo back a message to confirm the bot is working"""
+                logger.info(f"Received echo command from user {update.effective_user.id}")
+                await update.message.reply_text(f"Echo: I received your command! Bot is working.")
+            
+            # Register the echo command
+            self.application.add_handler(
+                TelegramCommandHandler("echo", echo_command)
+            )
+            logger.info("Added diagnostic echo command handler")
             
             self.application.add_error_handler(self.error_handler)
 
@@ -360,41 +392,21 @@ class BookingBot:
                     
                     # Only poll for updates on the primary instance
                     if is_primary_instance:
-                        # Use get_updates method to poll for updates
-                        logger.info("Starting to poll for updates on primary instance...")
-                        offset = 0
+                        # Use the built-in polling mechanism which is more reliable
+                        logger.info("Starting to poll for updates on primary instance using built-in method...")
                         
-                        # Keep the app running
+                        # Configure the updater with proper settings
+                        await self.application.bot.delete_webhook()
+                        await self.application.updater.start_polling(
+                            drop_pending_updates=True,
+                            allowed_updates=["message", "callback_query", "inline_query"],
+                            close_loop=False  # We'll manage the loop ourselves
+                        )
+                        
+                        # Keep the main loop running
+                        logger.info("Polling started successfully. Bot is now listening for messages.")
                         while True:
-                            try:
-                                # Get updates from Telegram
-                                updates = await self.application.bot.get_updates(offset=offset, timeout=30)
-                                
-                                # Process each update
-                                for update in updates:
-                                    try:
-                                        # Update offset to acknowledge this update
-                                        offset = update.update_id + 1
-                                        
-                                        # Process the update
-                                        await self.application.process_update(update)
-                                    except Exception as update_error:
-                                        # Log the error but continue processing other updates
-                                        logger.error(f"Error processing update {update.update_id}: {update_error}", exc_info=True)
-                                        # Try to handle with the error handler if possible
-                                        try:
-                                            context = CallbackContext.from_error(update, update_error, self.application)
-                                            await self.error_handler(update, context)
-                                        except Exception as handler_error:
-                                            logger.error(f"Error in error handler: {handler_error}", exc_info=True)
-                                
-                                # If no updates, sleep briefly
-                                if not updates:
-                                    await asyncio.sleep(1)
-                                    
-                            except Exception as e:
-                                logger.error(f"Error processing updates: {e}", exc_info=True)
-                                await asyncio.sleep(5)  # Wait before retrying
+                            await asyncio.sleep(60)  # Just keep the loop alive
                     else:
                         # Non-primary instances should just stay alive for health checks but not poll
                         logger.info("This is not the primary instance. Health check server active, but not polling for updates.")
@@ -405,9 +417,19 @@ class BookingBot:
                     logger.info("Starting bot in polling mode...")
                     await self.application.initialize()
                     await self.application.start()
-                    await self.application.updater.start_polling(drop_pending_updates=True)
+                    
+                    # Make sure any webhook is deleted
+                    await self.application.bot.delete_webhook()
+                    
+                    # Use the built-in polling method which is more reliable
+                    logger.info("Starting polling with built-in method...")
+                    await self.application.updater.start_polling(
+                        drop_pending_updates=True,
+                        allowed_updates=["message", "callback_query", "inline_query"]
+                    )
                     
                     # Keep the app running
+                    logger.info("Polling started successfully. Bot is now listening for messages.")
                     while True:
                         await asyncio.sleep(3600)  # Sleep for an hour
             

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Test script to verify browser reuse between searches.
+Test script to verify browser reuse between searches with extended timeout.
 """
 import asyncio
 import logging
@@ -19,12 +19,15 @@ from src.config.settings import Settings
 from src.services.browser_service import BrowserService
 
 async def run_sequential_searches():
-    """Run multiple searches in sequence to test browser reuse"""
-    logger.info("Starting browser reuse test")
+    """Run multiple searches in sequence to test browser reuse with extended timeout"""
+    logger.info("Starting browser reuse test with extended timeout")
     
     # Initialize settings and browser service
     settings = Settings()
     browser_service = BrowserService(settings)
+    
+    # Log the initial timeout value
+    logger.info(f"Initial inactivity timeout: {browser_service._inactivity_timeout} seconds ({browser_service._inactivity_timeout/60:.1f} minutes)")
     
     # First search
     logger.info("Starting first search")
@@ -35,7 +38,10 @@ async def run_sequential_searches():
     logger.info("Waiting 5 seconds between searches...")
     await asyncio.sleep(5)
     
-    # Second search
+    # Second search with extended timeout
+    logger.info("Extending timeout before second search")
+    await browser_service.extend_timeout(additional_seconds=1800)  # Add 30 more minutes
+    
     logger.info("Starting second search")
     result2 = await browser_service.execute_search("What are the best hotels in Paris?")
     logger.info(f"Second search completed, result length: {len(result2)}")

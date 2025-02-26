@@ -23,7 +23,7 @@ class BrowserService:
     _browser = None
     _browser_config = None
     _last_activity_time = None
-    _inactivity_timeout = 300  # 5 minutes inactivity timeout
+    _inactivity_timeout = 1800  # Increasing timeout from 300 to 1800 seconds (30 minutes)
     _inactivity_check_running = False
     _current_context = None  # Track the current browser context
 
@@ -72,19 +72,19 @@ class BrowserService:
 
     async def _check_inactivity(self):
         """Background task to check for browser inactivity and close if inactive too long"""
-        logger.info(f"Starting inactivity check (timeout: {self._inactivity_timeout} seconds)")
+        logger.info(f"Starting inactivity check (timeout: {self._inactivity_timeout} seconds = {self._inactivity_timeout/60} minutes)")
         while True:
             try:
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(120)  # Check every 2 minutes instead of every minute
                 if self._browser is not None and self._last_activity_time is not None:
                     current_time = time.time()
                     elapsed = current_time - self._last_activity_time
                     if elapsed > self._inactivity_timeout:
-                        logger.info(f"Browser inactive for {elapsed:.1f} seconds (timeout: {self._inactivity_timeout}), closing")
+                        logger.info(f"Browser inactive for {elapsed:.1f} seconds ({elapsed/60:.1f} minutes) (timeout: {self._inactivity_timeout} seconds), closing")
                         await self.cleanup(force=False)  # Not forcing, this is a normal inactivity timeout
                     else:
                         remaining = self._inactivity_timeout - elapsed
-                        logger.debug(f"Browser still active, {remaining:.1f} seconds until timeout")
+                        logger.info(f"Browser still active, {remaining:.1f} seconds ({remaining/60:.1f} minutes) until timeout")
             except Exception as e:
                 logger.error(f"Error in inactivity check: {e}", exc_info=True)
 
@@ -196,8 +196,26 @@ class BrowserService:
                 
                 logger.info(f"Running browser agent for task: {task_type}")
                 
-                # Run the agent and get the result
-                result = await agent.run()
+                # Create a background task to keep updating the activity timestamp while the agent is running
+                async def keep_browser_active():
+                    while self._browser is not None:
+                        self._last_activity_time = time.time()
+                        logger.debug("Updating browser activity timestamp to prevent timeout")
+                        await asyncio.sleep(60)  # Update every minute
+                
+                # Start the keep-alive task
+                keep_alive_task = asyncio.create_task(keep_browser_active())
+                
+                try:
+                    # Run the agent with max_steps parameter set to 12
+                    result = await agent.run(max_steps=12)
+                finally:
+                    # Cancel the keep-alive task when agent is done
+                    keep_alive_task.cancel()
+                    try:
+                        await keep_alive_task
+                    except asyncio.CancelledError:
+                        pass
                 
                 # Update activity timestamp after successful execution
                 self._last_activity_time = time.time()
@@ -715,4 +733,27 @@ class BrowserService:
             logger.error(f"Unexpected error during force browser close: {e}", exc_info=True)
             # Force reset even if error
             self._browser = None
+            return False
+
+    async def extend_timeout(self, additional_seconds=1800):
+        """
+        Extend the browser inactivity timeout by the specified number of seconds.
+        Useful for long-running tasks.
+        
+        Args:
+            additional_seconds: Number of seconds to extend the timeout by
+        """
+        try:
+            # Update the activity timestamp to reset the timeout countdown
+            self._last_activity_time = time.time()
+            
+            # Temporarily increase the inactivity timeout
+            original_timeout = self._inactivity_timeout
+            self._inactivity_timeout += additional_seconds
+            
+            logger.info(f"Extended browser timeout from {original_timeout} to {self._inactivity_timeout} seconds ({self._inactivity_timeout/60:.1f} minutes)")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error extending browser timeout: {e}", exc_info=True)
             return False

@@ -200,6 +200,9 @@ What can I help you with today?"""
             if is_reference_request:
                 logger.info("Reference request detected - using full conversation context")
             
+            # Extend the browser timeout for this search to ensure it doesn't time out
+            await self.browser_service.extend_timeout(additional_seconds=1800)  # Add 30 minutes to timeout
+            
             # Execute browser search with the query and conversation history - PASS USER_ID
             logger.info(f"Executing search with query: {search_query}")
             result = await self.browser_service.execute_search(search_query, "search", user_id)

@@ -623,6 +623,9 @@ class BrowserService:
                 disable_security=True
             )
             
+            # Initialize class-level browser config
+            BrowserService._browser_config = self.browser_config_obj
+            
             self.logger.info(f"Browser config initialized: {self.browser_config_obj}")
         except Exception as e:
             self.logger.error(f"Error initializing Claude LLM or browser config: {e}", exc_info=True)

@@ -6,6 +6,8 @@ import logging
 import sys
 import os
 from typing import Optional
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
 from telegram.ext import Application, CallbackContext, CommandHandler as TelegramCommandHandler
@@ -30,6 +32,29 @@ logger = logging.getLogger(__name__)
 
 # Apply patches for Railway compatibility
 apply_patches()
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """HTTP handler for health check requests"""
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        if self.path == "/telegram/webhook":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+    
+    def log_message(self, format, *args):
+        """Override to reduce log noise"""
+        if args[0].startswith("GET /telegram/webhook"):
+            return
+        logger.info("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
 
 
 class BookingBot:
@@ -123,6 +148,22 @@ class BookingBot:
         except Exception as e:
             logger.error(f"Error during bot shutdown: {e}", exc_info=True)
 
+    def start_health_check_server(self, port=8080):
+        """Start a simple HTTP server for health checks"""
+        try:
+            server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+            logger.info(f"Starting health check server on port {port}")
+            
+            # Run the server in a separate thread
+            thread = threading.Thread(target=server.serve_forever)
+            thread.daemon = True
+            thread.start()
+            
+            return server
+        except Exception as e:
+            logger.error(f"Failed to start health check server: {e}", exc_info=True)
+            return None
+
     def run(self):
         """Run the bot in either polling or webhook mode"""
         try:
@@ -155,6 +196,9 @@ class BookingBot:
                         logger.error("WEBHOOK_URL is required for webhook mode")
                         sys.exit(1)
                     
+                    # Start health check server on the same port as the webhook
+                    # health_check_server = self.start_health_check_server(port=8080)
+                    
                     # Configure webhook
                     webhook_url = f"{webhook_url}{webhook_path}"
                     logger.info(f"Starting bot in webhook mode at {webhook_url} on port {webhook_port}")
@@ -165,21 +209,41 @@ class BookingBot:
                     # Define signal handlers for graceful shutdown
                     async def signal_handler():
                         logger.info("Received termination signal, shutting down...")
+                        # if health_check_server:
+                        #     health_check_server.shutdown()
                         await self.shutdown()
                     
                     # Register signal handlers
                     self.application.add_signal_handler(signal.SIGINT, signal_handler)
                     self.application.add_signal_handler(signal.SIGTERM, signal_handler)
                     
-                    # Start the webhook
+                    # Start the application
                     await self.application.start()
                     await self.application.update_bot()
+                    
+                    # Add a custom webhook handler that also serves as a health check
+                    from telegram.ext import CommandHandler
+                    
+                    # Define a simple health check handler
+                    async def health_check_handler(update, context):
+                        if update is None:  # Direct HTTP request
+                            return True  # Return success for health checks
+                        else:  # Telegram update
+                            await update.message.reply_text("Bot is running!")
+                            return True
+                    
+                    # Register the health check handler
+                    self.application.add_handler(CommandHandler("healthcheck", health_check_handler))
+                    
+                    # Setup the webhook
                     await self.application.setup_webhook(
                         listen="0.0.0.0",
                         port=webhook_port,
                         url_path=webhook_path,
                         webhook_url=webhook_url
                     )
+                    
+                    # Start the webhook
                     await self.application.start_webhook(
                         drop_pending_updates=True,
                         allowed_updates=["message", "callback_query"]

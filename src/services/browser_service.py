@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 import asyncio
 import os
 import time
+import random
 
 from browser_use import Agent, Controller
 from browser_use.browser.browser import Browser, BrowserConfig
@@ -26,6 +27,20 @@ class BrowserService:
     _inactivity_timeout = 1800  # Increasing timeout from 300 to 1800 seconds (30 minutes)
     _inactivity_check_running = False
     _current_context = None  # Track the current browser context
+    
+    # Circuit breaker for Anthropic API
+    _anthropic_failures = 0
+    _anthropic_circuit_open = False
+    _anthropic_circuit_open_time = None
+    _anthropic_circuit_reset_after = 300  # Reset circuit after 5 minutes
+    _anthropic_failure_threshold = 3  # Open circuit after 3 consecutive failures
+    
+    # General circuit breaker for API overload
+    _circuit_open = False
+    _circuit_open_time = None
+    _circuit_failure_count = 0
+    _circuit_reset_threshold = 3  # Number of failures before opening circuit
+    _circuit_cooldown_period = 300  # 5 minutes cooldown when circuit is open
 
     def __new__(cls, settings: Settings):
         """Singleton pattern implementation"""
@@ -75,16 +90,23 @@ class BrowserService:
         logger.info(f"Starting inactivity check (timeout: {self._inactivity_timeout} seconds = {self._inactivity_timeout/60} minutes)")
         while True:
             try:
-                await asyncio.sleep(120)  # Check every 2 minutes instead of every minute
+                # Check less frequently - every 10 minutes instead of 5 minutes
+                await asyncio.sleep(600)  
+                
                 if self._browser is not None and self._last_activity_time is not None:
                     current_time = time.time()
                     elapsed = current_time - self._last_activity_time
                     if elapsed > self._inactivity_timeout:
-                        logger.info(f"Browser inactive for {elapsed:.1f} seconds ({elapsed/60:.1f} minutes) (timeout: {self._inactivity_timeout} seconds), closing")
+                        logger.info(f"Browser inactive for {elapsed:.1f} seconds, closing")
                         await self.cleanup(force=False)  # Not forcing, this is a normal inactivity timeout
                     else:
+                        # Only log if more than 20 minutes remaining to reduce log spam
                         remaining = self._inactivity_timeout - elapsed
-                        logger.info(f"Browser still active, {remaining:.1f} seconds ({remaining/60:.1f} minutes) until timeout")
+                        if remaining > 1200:
+                            logger.info(f"Browser still active, {remaining/60:.1f} minutes until timeout")
+                        else:
+                            # Use debug level for more frequent updates when approaching timeout
+                            logger.debug(f"Browser still active, {remaining/60:.1f} minutes until timeout")
             except Exception as e:
                 logger.error(f"Error in inactivity check: {e}", exc_info=True)
 
@@ -100,11 +122,13 @@ class BrowserService:
                     logger.warning(f"Error closing existing browser: {e}")
                 finally:
                     self._browser = None
-                    await asyncio.sleep(2)  # Wait before creating a new browser
+                    # Reduced wait time from 2 seconds to 1 second
+                    await asyncio.sleep(1)
             
             logger.info("Initializing new browser instance")
             self._browser = Browser(self._browser_config)
-            await asyncio.sleep(5)  # Wait for Steel.dev connection to establish
+            # Reduced wait time from 5 seconds to 3 seconds
+            await asyncio.sleep(3)
             logger.info("Browser initialization completed")
             
             # Start inactivity check only when the browser is first initialized
@@ -136,8 +160,35 @@ class BrowserService:
         Returns:
             str: Search result or task output
         """
+        # Check if circuit breaker is open
+        if self._circuit_open:
+            current_time = time.time()
+            if current_time - self._circuit_open_time < self._circuit_cooldown_period:
+                logger.warning(f"Circuit breaker is open. API is cooling down for {(self._circuit_open_time + self._circuit_cooldown_period - current_time) / 60:.1f} more minutes.")
+                return "I'm sorry, but our AI service is currently experiencing technical difficulties. Please try a simpler request or try again in a few minutes."
+            else:
+                # Reset circuit breaker after cooldown period
+                logger.info("Circuit breaker cooldown period completed. Resetting circuit.")
+                self._circuit_open = False
+                self._circuit_failure_count = 0
+        
         retry_count = 0
         max_retries = self.settings.MAX_RETRIES
+        max_anthropic_retries = 5  # Specific retries for Anthropic overload errors
+        anthropic_retry_delay = 15  # Increased initial delay from 10 to 15 seconds
+        
+        # Check if Anthropic circuit breaker is open
+        if self._anthropic_circuit_open:
+            current_time = time.time()
+            # Check if it's time to reset the circuit
+            if self._anthropic_circuit_open_time and (current_time - self._anthropic_circuit_open_time) > self._anthropic_circuit_reset_after:
+                logger.info("Resetting Anthropic circuit breaker after cooling period")
+                self._anthropic_circuit_open = False
+                self._anthropic_failures = 0
+            else:
+                # Circuit is still open, return a friendly message
+                logger.warning("Anthropic API circuit breaker is open, skipping browser search")
+                return "I'm sorry, but our AI service is currently experiencing technical difficulties. Please try a simpler request or try again in a few minutes."
         
         # Update activity timestamp for inactivity tracking
         self._last_activity_time = time.time()
@@ -164,7 +215,8 @@ class BrowserService:
             finally:
                 # Always set browser to None regardless of whether close succeeded
                 self._browser = None
-                await asyncio.sleep(2)  # Wait a bit before creating a new browser
+                # Reduced wait time from 2 seconds to 1 second
+                await asyncio.sleep(1)
         
         while retry_count < max_retries:
             try:
@@ -196,101 +248,135 @@ class BrowserService:
                 
                 logger.info(f"Running browser agent for task: {task_type}")
                 
+                # Check if we're running on Railway and should disable GIF creation
+                is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
+                disable_gif = os.environ.get('DISABLE_GIF_CREATION', 'false').lower() == 'true'
+                
+                # Automatically disable GIF creation on Railway to avoid font issues
+                if is_railway or disable_gif:
+                    if is_railway:
+                        logger.info("Running on Railway - automatically disabling GIF creation")
+                    else:
+                        logger.info("GIF creation disabled by environment variable")
+                
                 # Create a background task to keep updating the activity timestamp while the agent is running
                 async def keep_browser_active():
+                    update_count = 0
                     while self._browser is not None:
                         self._last_activity_time = time.time()
-                        logger.debug("Updating browser activity timestamp to prevent timeout")
-                        await asyncio.sleep(60)  # Update every minute
+                        
+                        # Only log occasionally to reduce log spam
+                        update_count += 1
+                        if update_count % 5 == 0:  # Log only every 5th update
+                            logger.debug(f"Updating browser activity timestamp (update #{update_count})")
+                        
+                        # Update less frequently - every 10 minutes instead of 5 minutes
+                        await asyncio.sleep(600)
                 
                 # Start the keep-alive task
                 keep_alive_task = asyncio.create_task(keep_browser_active())
                 
                 try:
-                    # Run the agent with max_steps parameter set to 12
-                    try:
-                        # Check if we're running on Railway and should disable GIF creation
-                        is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
-                        disable_gif = os.environ.get('DISABLE_GIF_CREATION', 'false').lower() == 'true'
-                        
-                        # Automatically disable GIF creation on Railway to avoid font issues
-                        if is_railway or disable_gif:
-                            if is_railway:
-                                logger.info("Running on Railway - automatically disabling GIF creation")
-                            else:
-                                logger.info("GIF creation disabled by environment variable")
-                            
-                            # Try to run with disable_history parameter, but fall back if not supported
-                            try:
-                                # Pass disable_history=True to prevent GIF creation
-                                result = await agent.run(max_steps=12, disable_history=True)
-                            except TypeError as e:
-                                # If the parameter is not supported, fall back to the standard call
-                                logger.warning(f"disable_history parameter not supported: {e}. Falling back to standard run.")
-                                result = await agent.run(max_steps=12)
-                        else:
-                            result = await agent.run(max_steps=12)
-                    except OSError as font_error:
-                        # This is likely a font-related error when creating the GIF on Railway
-                        if "cannot open resource" in str(font_error):
-                            logger.warning(f"Font resource error during GIF creation: {font_error}")
-                            # Try to get the result from the agent even if GIF creation failed
-                            if hasattr(agent, 'all_results') and agent.all_results:
-                                completed_actions = [
-                                    r for r in agent.all_results
-                                    if r.is_done and r.extracted_content
-                                ]
-                                if completed_actions:
-                                    result = completed_actions[-1].extracted_content
-                                    logger.info("Successfully recovered result despite GIF creation failure")
-                                else:
-                                    # If no completed actions with content, return a helpful message
-                                    result = "I found the information you requested, but encountered a technical issue when processing the results. Here's what I know: The search was completed successfully, but I couldn't generate the full report. Please try again or ask a more specific question."
-                            else:
-                                # If we can't recover the result, return an error message
-                                raise Exception("Search completed but couldn't extract results due to font resource error")
-                        else:
-                            # Re-raise if it's not the font resource error
-                            raise
-                finally:
+                    # Run the agent with increased max_steps
+                    agent_result = await agent.run(max_steps=12, disable_history=disable_gif)
+                    
+                    # Reset Anthropic failure counter on success
+                    self.__class__._anthropic_failures = 0
+                    
+                    # Extract the final result
+                    result = self.extract_final_result(agent_result)
+                    logger.info(f"Search completed successfully for user {user_id}")
+                    
                     # Cancel the keep-alive task when agent is done
                     keep_alive_task.cancel()
                     try:
                         await keep_alive_task
                     except asyncio.CancelledError:
                         pass
-                
-                # Update activity timestamp after successful execution
-                self._last_activity_time = time.time()
-                logger.info("Search completed successfully")
-                
-                # Close the browser after successful execution to ensure clean state for next search
-                try:
-                    await self.cleanup(force=True)
+                    
+                    # Update activity timestamp after successful execution
+                    self._last_activity_time = time.time()
+                    
+                    # Don't automatically close the browser after successful execution
+                    # This improves performance by allowing browser reuse
+                    # Only log that execution completed
+                    logger.info("Search completed successfully")
+                    
+                    return result
+                    
                 except Exception as e:
-                    logger.warning(f"Error during post-search browser cleanup: {e}")
-                    self._browser = None
-                
-                return self.extract_final_result(result)
-                
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"Search attempt {retry_count} failed: {e}", exc_info=True)
-                
-                # Always reset browser to None on any error
-                if self._browser is not None:
+                    # Cancel the keep-alive task when agent fails
+                    keep_alive_task.cancel()
                     try:
-                        await self._browser.close()
-                    except Exception as close_error:
-                        logger.warning(f"Error closing browser after failure: {close_error}")
-                    finally:
-                        self._browser = None
+                        await keep_alive_task
+                    except asyncio.CancelledError:
+                        pass
+                        
+                    logger.error(f"Error during search execution: {str(e)}")
+                    error_message = str(e).lower()
+                    
+                    # Check for overload conditions - expanded pattern matching
+                    if any(pattern in error_message for pattern in [
+                        "overloaded", "502", "too many requests", "rate limit", 
+                        "capacity", "busy", "unavailable", "429", "503", "504"
+                    ]):
+                        self._circuit_failure_count += 1
+                        logger.warning(f"Potential API overload detected. Failure count: {self._circuit_failure_count}/{self._circuit_reset_threshold}")
+                        
+                        if self._circuit_failure_count >= self._circuit_reset_threshold:
+                            self._circuit_open = True
+                            self._circuit_open_time = time.time()
+                            logger.warning(f"Circuit breaker opened. API cooling down for {self._circuit_cooldown_period / 60} minutes.")
+                            
+                            # Force close browser when circuit opens
+                            await self.force_close_browser()
+                            return "I'm sorry, but our AI service is currently experiencing high demand. Please try a simpler request or try again in a few minutes."
+                    
+                    # Retry logic for transient errors
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        # Improved backoff with increased initial delay and more jitter
+                        wait_time = min(5 * (2 ** retry_count) + random.uniform(0, 5), 120)  # Max 2 minutes
+                        logger.info(f"Retrying search (attempt {retry_count}/{max_retries}) after {wait_time:.2f}s")
+                        
+                        # Provide more detailed error message for debugging
+                        logger.debug(f"Error details for retry {retry_count}: {error_message}")
+                        
+                        await asyncio.sleep(wait_time)
+                        
+                        # Reset browser for next attempt
+                        await self.cleanup()
+                        await self.initialize_browser()
+                        continue
+                    
+                    # If we've exhausted retries, return a user-friendly error message
+                    logger.error(f"Failed to execute search after {max_retries} retries")
+                    
+                    # Provide more specific error messages based on error type
+                    if "timeout" in error_message:
+                        return "I'm sorry, but the request took too long to process. Please try a simpler request or try again later."
+                    elif "memory" in error_message or "resource" in error_message:
+                        return "I'm sorry, but your request was too complex for our system to handle. Please try a simpler request."
+                    else:
+                        return "I'm sorry, but I encountered an error while processing your request. Please try again later or try a different request."
+            
+            except Exception as e:
+                # Handle any exceptions that occur outside the agent execution
+                logger.error(f"Error during search setup: {str(e)}")
                 
-                await asyncio.sleep(3)  # Wait before retrying
+                # Retry logic for setup errors
+                if retry_count < max_retries:
+                    retry_count += 1
+                    wait_time = min(2 ** retry_count + random.uniform(0, 1), 30)  # Max 30 seconds for setup errors
+                    logger.info(f"Retrying search setup (attempt {retry_count}/{max_retries}) after {wait_time:.2f}s")
+                    await asyncio.sleep(wait_time)
+                    continue
                 
-                # If we've reached max retries, return an error message
-                if retry_count >= max_retries:
-                    return f"I'm sorry, I encountered an issue while searching. Please try again. Error: {str(e)}"
+                # If we've exhausted retries, return an error
+                return f"I'm sorry, I encountered an error while setting up the search. Please try again later. Error: {str(e)}"
+        
+        # This should never be reached, but just in case
+        return "An unexpected error occurred. Please try again."
 
     async def cleanup(self, force=False):
         """
@@ -831,3 +917,27 @@ class BrowserService:
         except Exception as e:
             logger.error(f"Error extending browser timeout: {e}", exc_info=True)
             return False
+
+    async def reset_circuit_breaker(self):
+        """Reset the circuit breaker state."""
+        logger.info("Manually resetting circuit breaker state")
+        self._circuit_open = False
+        self._circuit_open_time = None
+        self._circuit_failure_count = 0
+        self.__class__._anthropic_failures = 0
+        self.__class__._anthropic_circuit_open = False
+        self.__class__._anthropic_circuit_open_time = None
+        return True
+
+    def __init__(self, settings):
+        self.settings = settings
+        self.browser = None
+        self.page = None
+        self._last_activity_time = time.time()
+        self._browser_lock = asyncio.Lock()
+        
+        # Initialize the browser
+        asyncio.create_task(self.initialize_browser())
+        
+        # Start the inactivity checker
+        asyncio.create_task(self.check_inactivity())

@@ -12,7 +12,9 @@ import socket
 import time
 import psutil
 import datetime
+import random
 
+import telegram
 from telegram import Update
 from telegram.ext import Application, CallbackContext, CommandHandler as TelegramCommandHandler
 from telegram.error import NetworkError, Conflict
@@ -423,6 +425,22 @@ class BookingBot:
                     is_primary_instance = True  # When running on Railway with 1 replica, always poll for updates
                     logger.info(f"Is primary instance that should poll for updates: {is_primary_instance}")
                     
+                    # Add a random delay before starting as primary instance to prevent race conditions
+                    # This helps avoid conflicts when multiple instances might be starting at the same time
+                    if is_primary_instance and railway_service_id:
+                        random_delay = random.uniform(5.0, 15.0)
+                        logger.info(f"Adding a random delay of {random_delay:.2f} seconds before starting as primary instance")
+                        await asyncio.sleep(random_delay)
+                        
+                        # Check again if another instance has claimed primary status
+                        try:
+                            webhook_info = await self.application.bot.get_webhook_info()
+                            if webhook_info.url:
+                                logger.warning(f"After delay, found webhook at {webhook_info.url}. Another instance might be primary.")
+                                # We'll still continue but with extra caution
+                        except Exception as e:
+                            logger.error(f"Error checking webhook after delay: {e}")
+                    
                     # Configure signals for graceful shutdown
                     import signal
                     
@@ -466,6 +484,23 @@ class BookingBot:
                             webhook_info = await self.application.bot.get_webhook_info()
                             logger.info(f"Current webhook status - URL: {webhook_info.url}, Pending updates: {webhook_info.pending_update_count}")
                             
+                            # First, try to check if another instance is actively polling
+                            # We'll do this by attempting to get updates with a very short timeout
+                            try:
+                                logger.info("Checking if another instance is actively polling...")
+                                test_updates = await self.application.bot.get_updates(limit=1, timeout=1)
+                                logger.info(f"Successfully retrieved {len(test_updates)} test updates")
+                            except telegram.error.Conflict as conflict_error:
+                                logger.warning(f"Detected another instance already polling: {conflict_error}")
+                                logger.info("Waiting 60 seconds before trying to take over polling...")
+                                await asyncio.sleep(60)
+                                # Try to forcefully take over by deleting the webhook and waiting
+                                await self.application.bot.delete_webhook(drop_pending_updates=True)
+                                await asyncio.sleep(10)
+                                logger.info("Attempting to take over polling after waiting period")
+                            except Exception as e:
+                                logger.error(f"Error during polling check: {e}")
+                            
                             if webhook_info.url:
                                 logger.info("Deleting existing webhook before polling")
                                 await self.application.bot.delete_webhook()
@@ -475,10 +510,18 @@ class BookingBot:
                             # Configure the updater with proper settings
                             logger.info("Starting polling with application.updater.start_polling()")
                             try:
+                                # Add a delay to ensure any other polling instances have stopped
+                                logger.info("Waiting 5 seconds before starting polling to avoid conflicts...")
+                                await asyncio.sleep(5)
+                                
+                                # Forcefully delete webhook again to be absolutely sure
+                                logger.info("Double checking webhook is deleted...")
+                                await self.application.bot.delete_webhook(drop_pending_updates=True)
+                                
+                                # Start polling without the invalid 'close_loop' parameter
                                 await self.application.updater.start_polling(
                                     drop_pending_updates=True,
-                                    allowed_updates=["message", "callback_query", "inline_query"],
-                                    close_loop=False  # We'll manage the loop ourselves
+                                    allowed_updates=["message", "callback_query", "inline_query"]
                                 )
                                 logger.info("Polling started successfully. Bot is now listening for messages.")
                                 
@@ -492,19 +535,40 @@ class BookingBot:
                                 logger.info("Trying manual polling as fallback")
                                 # Keep the loop running
                                 offset = 0
+                                last_update_time = time.time()
+                                
                                 while True:
                                     try:
+                                        # Add randomized delay to prevent conflicts between instances
+                                        await asyncio.sleep(random.uniform(1.0, 3.0))
+                                        
+                                        # Only try to get updates if it's been at least 3 seconds since last update
+                                        current_time = time.time()
+                                        if current_time - last_update_time < 3.0:
+                                            await asyncio.sleep(1)
+                                            continue
+                                            
+                                        logger.info(f"Manual polling attempt with offset {offset}")
                                         updates = await self.application.bot.get_updates(offset=offset, timeout=30)
+                                        last_update_time = time.time()
+                                        
                                         logger.info(f"Received {len(updates)} updates")
                                         for update in updates:
                                             offset = update.update_id + 1
                                             await self.application.process_update(update)
-                                        await asyncio.sleep(1)
+                                        
+                                        # Sleep longer if no updates to reduce polling frequency
+                                        if not updates:
+                                            await asyncio.sleep(2)
+                                    except telegram.error.Conflict as conflict_error:
+                                        logger.error(f"Conflict error in fallback polling: {conflict_error}")
+                                        logger.info("Another instance is polling. Waiting 30 seconds before trying again...")
+                                        await asyncio.sleep(30)  # Wait longer when conflicts occur
                                     except Exception as e:
                                         logger.error(f"Error in fallback polling: {e}", exc_info=True)
                                         await asyncio.sleep(5)
                             
-                            # Keep the main loop running
+                            # Keep the main loop running after the fallback polling
                             logger.info("Polling started successfully. Bot is now listening for messages.")
                             logger.info("Waiting for messages from users...")
                             while True:
@@ -519,10 +583,16 @@ class BookingBot:
                                         # Try to reconnect
                                         logger.info("Attempting to reconnect...")
                                         try:
+                                            # Wait before attempting reconnection
+                                            await asyncio.sleep(5)
+                                            
+                                            # Ensure no webhook is set
+                                            await self.application.bot.delete_webhook(drop_pending_updates=False)
+                                            
+                                            # Start polling without the invalid parameter
                                             await self.application.updater.start_polling(
                                                 drop_pending_updates=False,  # Keep existing updates
-                                                allowed_updates=["message", "callback_query", "inline_query"],
-                                                close_loop=False
+                                                allowed_updates=["message", "callback_query", "inline_query"]
                                             )
                                             logger.info("Reconnected successfully")
                                         except Exception as reconnect_error:
@@ -550,12 +620,31 @@ class BookingBot:
                         webhook_info = await self.application.bot.get_webhook_info()
                         logger.info(f"Current webhook status - URL: {webhook_info.url}, Pending updates: {webhook_info.pending_update_count}")
                         
+                        # First, try to check if another instance is actively polling
+                        try:
+                            logger.info("Checking if another instance is actively polling...")
+                            test_updates = await self.application.bot.get_updates(limit=1, timeout=1)
+                            logger.info(f"Successfully retrieved {len(test_updates)} test updates")
+                        except telegram.error.Conflict as conflict_error:
+                            logger.warning(f"Detected another instance already polling: {conflict_error}")
+                            logger.info("Waiting 30 seconds before trying to take over polling...")
+                            await asyncio.sleep(30)
+                            await self.application.bot.delete_webhook(drop_pending_updates=True)
+                            await asyncio.sleep(5)
+                            logger.info("Attempting to take over polling after waiting period")
+                        except Exception as e:
+                            logger.error(f"Error during polling check: {e}")
+                        
                         if webhook_info.url:
                             logger.info("Deleting existing webhook before polling")
                             await self.application.bot.delete_webhook()
                         
                         # Use the built-in polling method which is more reliable
                         logger.info("Starting polling with built-in method...")
+                        # Add a delay to ensure any other polling instances have stopped
+                        logger.info("Waiting 5 seconds before starting polling to avoid conflicts...")
+                        await asyncio.sleep(5)
+                        
                         await self.application.updater.start_polling(
                             drop_pending_updates=True,
                             allowed_updates=["message", "callback_query", "inline_query"]
@@ -565,11 +654,39 @@ class BookingBot:
                         me = await self.application.bot.get_me()
                         logger.info(f"Connected to Telegram as {me.first_name} (@{me.username})")
                         
-                        # Keep the app running
+                        # Keep the main loop running
                         logger.info("Polling started successfully. Bot is now listening for messages.")
                         logger.info("Waiting for messages from users...")
                         while True:
-                            await asyncio.sleep(3600)  # Sleep for an hour
+                            try:
+                                await asyncio.sleep(60)  # Just keep the loop alive
+                                # Check bot status every minute
+                                try:
+                                    me = await self.application.bot.get_me()
+                                    logger.debug(f"Bot is still connected as {me.username}")
+                                except Exception as check_error:
+                                    logger.error(f"Error checking bot status: {check_error}")
+                                    # Try to reconnect
+                                    logger.info("Attempting to reconnect...")
+                                    try:
+                                        # Wait before attempting reconnection
+                                        await asyncio.sleep(5)
+                                        
+                                        # Ensure no webhook is set
+                                        await self.application.bot.delete_webhook(drop_pending_updates=False)
+                                        
+                                        # Start polling without the invalid parameter
+                                        await self.application.updater.start_polling(
+                                            drop_pending_updates=False,  # Keep existing updates
+                                            allowed_updates=["message", "callback_query", "inline_query"]
+                                        )
+                                        logger.info("Reconnected successfully")
+                                    except Exception as reconnect_error:
+                                        logger.error(f"Failed to reconnect: {reconnect_error}")
+                            except Exception as loop_error:
+                                logger.error(f"Error in main loop: {loop_error}")
+                                # Don't exit the loop no matter what
+                                await asyncio.sleep(10)  # Wait before next iteration
                     except Exception as e:
                         logger.error(f"Error in polling mode: {e}", exc_info=True)
                         raise

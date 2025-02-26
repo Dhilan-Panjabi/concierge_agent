@@ -610,8 +610,7 @@ class BrowserService:
         
         # Initialize Claude LLM for browser use
         try:
-            # Import and configure Claude for browser use
-            from browser_use import Agent, AgentConfig, BrowserConfig
+            # Initialize Claude LLM
             from langchain_anthropic import ChatAnthropic
             
             # Initialize Claude LLM
@@ -1126,7 +1125,7 @@ class BrowserService:
         self.logger.info(f"Searching hotels with query: {query}, location: {location}, check_in: {check_in}, check_out: {check_out}")
         
         try:
-            from browser_use import Agent, AgentConfig
+            from browser_use.agent.service import Agent
             
             # Construct search URL
             search_term = f"{query} hotel {location}" if location else f"{query} hotel"
@@ -1142,10 +1141,8 @@ class BrowserService:
             agent = Agent.create_browser(
                 llm=self.claude_llm,
                 browser_config=self.browser_config_obj,
-                agent_config=AgentConfig(
-                    name="HotelSearchAgent",
-                    description="Agent for searching hotel information",
-                )
+                name="HotelSearchAgent",
+                description="Agent for searching hotel information"
             )
             
             self.logger.info("Browser agent created successfully. Starting search...")
@@ -1177,7 +1174,7 @@ class BrowserService:
         self.logger.info(f"Searching restaurants with location: {location}, cuisine: {cuisine}, price_range: {price_range}")
         
         try:
-            from browser_use import Agent, AgentConfig
+            from browser_use.agent.service import Agent
             
             # Construct search query
             search_term = f"best restaurants in {location}"
@@ -1195,10 +1192,8 @@ class BrowserService:
             agent = Agent.create_browser(
                 llm=self.claude_llm,
                 browser_config=self.browser_config_obj,
-                agent_config=AgentConfig(
-                    name="RestaurantSearchAgent",
-                    description="Agent for searching restaurant information",
-                )
+                name="RestaurantSearchAgent",
+                description="Agent for searching restaurant information"
             )
             
             self.logger.info("Restaurant browser agent created successfully. Starting search...")

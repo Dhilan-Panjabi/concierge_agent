@@ -34,7 +34,7 @@ class Settings:
         
         # API Keys
         self.OPENAI_API_KEY: str = self._get_env('OPENAI_API_KEY')
-        self.DEEPSEEK_API_KEY: str = self._get_env('DEEPSEEK_API_KEY')
+        self.DEEPSEEK_API_KEY: Optional[str] = os.getenv('DEEPSEEK_API_KEY', '')
         self.STEEL_API_KEY: str = self._get_env('STEEL_API_KEY')
         self.OPENROUTER_API_KEY: str = self._get_env('OPENROUTER_API_KEY')
 
@@ -128,13 +128,18 @@ class Settings:
                 f"Invalid integer value for {key}, using default: {default}")
             return default
 
-    def _initialize_deepseek(self) -> ChatOpenAI:
+    def _initialize_deepseek(self) -> Optional[ChatOpenAI]:
         """
         Initialize DeepSeek AI model.
         
         Returns:
-            ChatOpenAI: Initialized DeepSeek model
+            Optional[ChatOpenAI]: Initialized DeepSeek model or None if API key is not available
         """
+        # Skip initialization if DEEPSEEK_API_KEY is not provided
+        if not self.DEEPSEEK_API_KEY:
+            logger.warning("DEEPSEEK_API_KEY not provided, DeepSeek model will not be available")
+            return None
+            
         try:
             return ChatOpenAI(
                 base_url='https://api.deepseek.com/v1',
@@ -143,7 +148,7 @@ class Settings:
             )
         except Exception as e:
             logger.error(f"Error initializing DeepSeek: {e}")
-            raise
+            return None  # Return None instead of raising exception
 
     def _validate_settings(self) -> None:
         """
@@ -155,7 +160,6 @@ class Settings:
         required_settings = [
             ('BOT_TOKEN', self.BOT_TOKEN),
             ('OPENAI_API_KEY', self.OPENAI_API_KEY),
-            ('DEEPSEEK_API_KEY', self.DEEPSEEK_API_KEY),
             ('STEEL_API_KEY', self.STEEL_API_KEY),
             ('SUPABASE_URL', self.SUPABASE_URL),
             ('SUPABASE_KEY', self.SUPABASE_KEY),

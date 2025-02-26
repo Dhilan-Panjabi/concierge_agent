@@ -43,6 +43,18 @@ health_check_server = None
 def start_health_check_server():
     global health_check_server_running, health_check_server
     try:
+        # First, check if the port is already in use (which would mean our start.py health check is running)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('127.0.0.1', 8080))
+        sock.close()
+        
+        if result == 0:
+            # Port is already in use, likely by the health check server from start.py
+            logger.info("Port 8080 is already in use, assuming health check server is already running")
+            health_check_server_running = True
+            return
+            
+        # Otherwise, continue to start our own health check server
         class SimpleHealthCheckHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 logger.info(f"Health check request received: {self.path}")

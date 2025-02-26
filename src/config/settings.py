@@ -26,6 +26,12 @@ class Settings:
         self.BOT_TOKEN: str = self._get_env('TELEGRAM_BOT_TOKEN')
         self.BOT_USERNAME: str = self._get_env('BOT_USERNAME', 'YourBot')
 
+        # Webhook settings
+        self.USE_WEBHOOK: bool = self._get_env_bool('USE_WEBHOOK', False)
+        self.WEBHOOK_URL: Optional[str] = os.getenv('WEBHOOK_URL')
+        self.WEBHOOK_PORT: int = self._get_env_int('PORT', 8443)
+        self.WEBHOOK_PATH: str = self._get_env('WEBHOOK_PATH', '')
+        
         # API Keys
         self.OPENAI_API_KEY: str = self._get_env('OPENAI_API_KEY')
         self.DEEPSEEK_API_KEY: str = self._get_env('DEEPSEEK_API_KEY')
@@ -156,6 +162,12 @@ class Settings:
             ('OPENROUTER_API_KEY', self.OPENROUTER_API_KEY),
         ]
 
+        # Add webhook URL validation only if webhook mode is enabled
+        if self.USE_WEBHOOK and not self.WEBHOOK_URL:
+            error_msg = "WEBHOOK_URL is required when USE_WEBHOOK is enabled"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
         for name, value in required_settings:
             if not value:
                 error_msg = f"Missing required setting: {name}"
@@ -185,4 +197,18 @@ class Settings:
         return {
             'search_timeout': self.SEARCH_TIMEOUT,
             'max_retries': self.MAX_RETRIES,
+        }
+        
+    def get_webhook_config(self) -> dict:
+        """
+        Get webhook configuration dictionary.
+        
+        Returns:
+            dict: Webhook configuration
+        """
+        return {
+            'use_webhook': self.USE_WEBHOOK,
+            'webhook_url': self.WEBHOOK_URL,
+            'webhook_port': self.WEBHOOK_PORT,
+            'webhook_path': self.WEBHOOK_PATH,
         }

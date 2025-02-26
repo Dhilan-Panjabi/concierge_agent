@@ -201,10 +201,10 @@ What can I help you with today?"""
                 logger.info("Reference request detected - using full conversation context")
             
             # Extend the browser timeout for this search to ensure it doesn't time out
-            await self.browser_service.extend_timeout(additional_seconds=1800)  # Add 30 minutes to timeout
+            await self.browser_service.extend_timeout(user_id=user_id, additional_seconds=1800)  # Add 30 minutes to timeout
             
-            # Execute browser search with the query and conversation history - PASS USER_ID
-            logger.info(f"Executing search with query: {search_query}")
+            # Execute browser search with the query and conversation history
+            logger.info(f"Executing search with query: {search_query} for user {user_id}")
             result = await self.browser_service.execute_search(search_query, "search", user_id)
             response = await self.ai_service.format_response(search_query, result, user_id)
 
@@ -237,10 +237,11 @@ What can I help you with today?"""
 
     async def handle_cleanup_confirmation(self, update: Update, context: CallbackContext, user_message: str) -> int:
         """Handle browser cleanup confirmation"""
+        user_id = update.message.from_user.id
         context.user_data['awaiting_cleanup_confirmation'] = False
         
         if user_message.lower() in ['yes', 'y']:
-            await self.browser_service.cleanup()
+            await self.browser_service.cleanup(user_id=user_id)
             await update.message.reply_text("Browser session closed. You can start a new search anytime!")
         else:
             await update.message.reply_text("Keeping the browser session active. You can continue searching!")
@@ -752,6 +753,9 @@ What can I help you with today?"""
             
             logger.info(f"Making booking with context: Restaurant={restaurant}, Date={date}, Time={time}, Party={party_size}")
             logger.debug(f"Using contact info: Name={name}, Email={email}, Phone={phone[:4]}*** (partially masked)")
+            
+            # Extend the browser timeout for this booking to ensure it doesn't time out
+            await self.browser_service.extend_timeout(user_id=user_id, additional_seconds=1800)  # Add 30 minutes to timeout
             
             # Execute the booking with task_type="booking" to ensure sensitive data is passed
             result = await self.browser_service.execute_search(

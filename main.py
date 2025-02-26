@@ -4,10 +4,11 @@ Main entry point for the Telegram Booking Bot.
 import asyncio
 import logging
 import sys
+import os
 from typing import Optional
 
 from telegram import Update
-from telegram.ext import Application, CallbackContext
+from telegram.ext import Application, CallbackContext, CommandHandler as TelegramCommandHandler
 from telegram.error import NetworkError, Conflict
 
 from src.config.settings import Settings
@@ -76,6 +77,16 @@ class BookingBot:
                 logger.critical(f"Failed to initialize bot: {e}", exc_info=True)
                 sys.exit(1)
 
+    async def initialize(self):
+        """Async initialization for components that require an event loop"""
+        try:
+            # Nothing to initialize asynchronously at the moment
+            # Browser will be initialized on first use
+            pass
+        except Exception as e:
+            logger.error(f"Error in async initialization: {e}", exc_info=True)
+            raise
+
     async def error_handler(self, update: Optional[Update], context: CallbackContext) -> None:
         """Global error handler for the bot"""
         try:
@@ -93,20 +104,103 @@ class BookingBot:
         except Exception as e:
             logger.error(f"Error in error handler: {e}", exc_info=True)
 
+    async def health_check(self, update: Update, context: CallbackContext) -> None:
+        """Health check endpoint for the webhook server"""
+        await update.message.reply_text("Bot is running!")
+
+    async def shutdown(self):
+        """Gracefully shut down the bot and clean up resources"""
+        try:
+            logger.info("Shutting down bot and cleaning up resources...")
+            
+            # Clean up all browser instances
+            await self.browser_service.cleanup()
+            
+            # Clear message data
+            MessageUtils._user_data.clear()
+            
+            logger.info("Bot shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during bot shutdown: {e}", exc_info=True)
+
     def run(self):
-        """Run the bot"""
+        """Run the bot in either polling or webhook mode"""
         try:
             # Add handlers
             self.application.add_handler(
                 self.conversation_manager.get_conversation_handler()
             )
+            
+            # Add health check command
+            self.application.add_handler(
+                TelegramCommandHandler("health", self.health_check)
+            )
+            
             self.application.add_error_handler(self.error_handler)
 
-            # Start the bot
-            logger.info("Starting bot...")
+            # Get webhook configuration from settings
+            webhook_config = self.settings.get_webhook_config()
+            use_webhook = webhook_config['use_webhook']
             
-            # Run the application
-            self.application.run_polling(drop_pending_updates=True)
+            # Initialize async components
+            async def start():
+                await self.initialize()
+                
+                if use_webhook:
+                    webhook_url = webhook_config['webhook_url']
+                    webhook_port = webhook_config['webhook_port']
+                    webhook_path = webhook_config['webhook_path']
+                    
+                    if not webhook_url:
+                        logger.error("WEBHOOK_URL is required for webhook mode")
+                        sys.exit(1)
+                    
+                    # Configure webhook
+                    webhook_url = f"{webhook_url}{webhook_path}"
+                    logger.info(f"Starting bot in webhook mode at {webhook_url} on port {webhook_port}")
+                    
+                    # Register shutdown handler for graceful termination
+                    import signal
+                    
+                    # Define signal handlers for graceful shutdown
+                    async def signal_handler():
+                        logger.info("Received termination signal, shutting down...")
+                        await self.shutdown()
+                    
+                    # Register signal handlers
+                    self.application.add_signal_handler(signal.SIGINT, signal_handler)
+                    self.application.add_signal_handler(signal.SIGTERM, signal_handler)
+                    
+                    # Start the webhook
+                    await self.application.start()
+                    await self.application.update_bot()
+                    await self.application.setup_webhook(
+                        listen="0.0.0.0",
+                        port=webhook_port,
+                        url_path=webhook_path,
+                        webhook_url=webhook_url
+                    )
+                    await self.application.start_webhook(
+                        drop_pending_updates=True,
+                        allowed_updates=["message", "callback_query"]
+                    )
+                    
+                    # Keep the app running
+                    while True:
+                        await asyncio.sleep(3600)  # Sleep for an hour
+                else:
+                    # Start the bot in polling mode
+                    logger.info("Starting bot in polling mode...")
+                    await self.application.initialize()
+                    await self.application.start()
+                    await self.application.updater.start_polling(drop_pending_updates=True)
+                    
+                    # Keep the app running
+                    while True:
+                        await asyncio.sleep(3600)  # Sleep for an hour
+            
+            # Run the async function
+            asyncio.run(start())
 
         except Exception as e:
             logger.critical(f"Failed to start bot: {e}", exc_info=True)
@@ -130,6 +224,7 @@ def main():
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.critical(f"Critical error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,18 @@
 """
-Browser automation service for web interactions.
+Service for browser automation tasks.
 """
-import logging
-from typing import Optional, Dict, Any
-from langchain_openai import ChatOpenAI
 import asyncio
+import logging
 import os
-import time
 import random
+import time
+from datetime import datetime
+from typing import Dict, Any, Optional, List
 
-from browser_use import Agent, Controller
 from browser_use.browser.browser import Browser, BrowserConfig
+from browser_use.agent.service import Agent
+from langchain_openai import ChatOpenAI
+
 from src.config.settings import Settings
 from src.utils.message_utils import MessageUtils
 
@@ -21,12 +23,12 @@ class BrowserService:
     """Handles all browser automation tasks"""
 
     _instance = None
-    _browser = None
+    _browsers = {}  # Dictionary to store browser instances by user_id
     _browser_config = None
-    _last_activity_time = None
+    _last_activity_times = {}  # Dictionary to track activity times by user_id
     _inactivity_timeout = 1800  # Increasing timeout from 300 to 1800 seconds (30 minutes)
     _inactivity_check_running = False
-    _current_context = None  # Track the current browser context
+    _current_contexts = {}  # Track the current browser context by user_id
     
     # Circuit breaker for Anthropic API
     _anthropic_failures = 0
@@ -46,92 +48,110 @@ class BrowserService:
         """Singleton pattern implementation"""
         if cls._instance is None:
             cls._instance = super(BrowserService, cls).__new__(cls)
-            cls._instance.settings = settings
-            cls._instance._browser_config = cls._instance._initialize_browser_config()
-            cls._instance._last_activity_time = time.time()
-            # Initialize Claude LLM for browser tasks
-            cls._instance.claude_llm = cls._instance._initialize_claude_llm()
-            
-            # The inactivity check will be started in initialize_browser
-            
         return cls._instance
-    
+
     def _initialize_claude_llm(self):
-        """Initialize Claude LLM via OpenRouter for browser tasks"""
+        """
+        Initialize Claude LLM for browser tasks.
+        
+        Returns:
+            LLM: Initialized Claude LLM
+        """
         try:
-            from langchain_openai import ChatOpenAI
-            
-            # Using Claude via OpenRouter
-            return ChatOpenAI(
-                model=self.settings.CLAUDE_MODEL,
-                api_key=self.settings.OPENROUTER_API_KEY,
+            # Initialize Claude LLM with OpenRouter
+            claude_llm = ChatOpenAI(
                 base_url="https://openrouter.ai/api/v1",
-                max_tokens=4096,
-                temperature=0.1
+                api_key=self.settings.OPENROUTER_API_KEY,
+                model=self.settings.CLAUDE_MODEL,
+                max_tokens=4096
             )
+            
+            logger.info(f"Claude LLM initialized with model: {self.settings.CLAUDE_MODEL}")
+            return claude_llm
         except Exception as e:
-            logger.error(f"Failed to initialize Claude LLM: {e}", exc_info=True)
+            logger.error(f"Error initializing Claude LLM: {e}")
             raise
 
     def _initialize_browser_config(self) -> BrowserConfig:
         """
-        Initializes browser configuration.
+        Initialize browser configuration.
         
         Returns:
-            BrowserConfig: Configured browser settings
+            BrowserConfig: Browser configuration
         """
-        return BrowserConfig(
-            headless=True,
-            cdp_url=f'wss://connect.steel.dev?apiKey={self.settings.STEEL_API_KEY}'
-        )
+        try:
+            browser_config_dict = self.settings.get_browser_config()
+            # BrowserConfig doesn't accept 'browserless' parameter directly
+            browser_config = BrowserConfig(
+                headless=browser_config_dict['headless'],
+            )
+            
+            # If browserless is enabled, set the browserless_url
+            if browser_config_dict.get('browserless', False):
+                browser_config.browserless_url = browser_config_dict.get('browserless_url')
+                
+            logger.info(f"Browser config initialized: {browser_config}")
+            return browser_config
+        except Exception as e:
+            logger.error(f"Error initializing browser config: {e}")
+            raise
 
     async def _check_inactivity(self):
-        """Background task to check for browser inactivity and close if inactive too long"""
-        logger.info(f"Starting inactivity check (timeout: {self._inactivity_timeout} seconds = {self._inactivity_timeout/60} minutes)")
-        while True:
-            try:
-                # Check less frequently - every 10 minutes instead of 5 minutes
-                await asyncio.sleep(600)  
-                
-                if self._browser is not None and self._last_activity_time is not None:
-                    current_time = time.time()
-                    elapsed = current_time - self._last_activity_time
-                    if elapsed > self._inactivity_timeout:
-                        logger.info(f"Browser inactive for {elapsed:.1f} seconds, closing")
-                        await self.cleanup(force=False)  # Not forcing, this is a normal inactivity timeout
-                    else:
-                        # Only log if more than 20 minutes remaining to reduce log spam
-                        remaining = self._inactivity_timeout - elapsed
-                        if remaining > 1200:
-                            logger.info(f"Browser still active, {remaining/60:.1f} minutes until timeout")
-                        else:
-                            # Use debug level for more frequent updates when approaching timeout
-                            logger.debug(f"Browser still active, {remaining/60:.1f} minutes until timeout")
-            except Exception as e:
-                logger.error(f"Error in inactivity check: {e}", exc_info=True)
-
-    async def initialize_browser(self):
-        """Initialize browser if not already initialized"""
+        """Check for browser inactivity and cleanup if needed"""
         try:
-            # Always create a new browser instance
-            if self._browser is not None:
-                logger.warning("Browser instance already exists, closing it first")
+            while True:
+                # Check each browser instance for inactivity
+                current_time = time.time()
+                browsers_to_close = []
+                
+                for user_id, last_activity_time in list(self._last_activity_times.items()):
+                    if user_id in self._browsers and last_activity_time is not None:
+                        elapsed = current_time - last_activity_time
+                        remaining = self._inactivity_timeout - elapsed
+                        
+                        if elapsed > self._inactivity_timeout:
+                            logger.info(f"Browser for user {user_id} inactive for {elapsed:.1f} seconds, cleaning up")
+                            browsers_to_close.append(user_id)
+                        elif remaining < 300:  # Less than 5 minutes remaining
+                            # Log more frequently as we approach timeout
+                            if remaining < 60:  # Less than 1 minute
+                                logger.info(f"Browser for user {user_id} still active, {remaining/60:.1f} minutes until timeout")
+                            else:
+                                # Use debug level for more frequent updates when approaching timeout
+                                logger.debug(f"Browser for user {user_id} still active, {remaining/60:.1f} minutes until timeout")
+                
+                # Close inactive browsers
+                for user_id in browsers_to_close:
+                    await self.cleanup(user_id=user_id)
+                
+                # Sleep for 60 seconds before checking again
+                await asyncio.sleep(60)
+            
+        except Exception as e:
+            logger.error(f"Error in inactivity check: {e}", exc_info=True)
+
+    async def initialize_browser(self, user_id: int = 1):
+        """Initialize browser for a specific user if not already initialized"""
+        try:
+            # Always create a new browser instance for this user if requested
+            if user_id in self._browsers and self._browsers[user_id] is not None:
+                logger.warning(f"Browser instance for user {user_id} already exists, closing it first")
                 try:
-                    await self._browser.close()
+                    await self._browsers[user_id].close()
                 except Exception as e:
-                    logger.warning(f"Error closing existing browser: {e}")
+                    logger.warning(f"Error closing existing browser for user {user_id}: {e}")
                 finally:
-                    self._browser = None
+                    self._browsers[user_id] = None
                     # Reduced wait time from 2 seconds to 1 second
                     await asyncio.sleep(1)
             
-            logger.info("Initializing new browser instance")
-            self._browser = Browser(self._browser_config)
+            logger.info(f"Initializing new browser instance for user {user_id}")
+            self._browsers[user_id] = Browser(self._browser_config)
             # Reduced wait time from 5 seconds to 3 seconds
             await asyncio.sleep(3)
-            logger.info("Browser initialization completed")
+            logger.info(f"Browser initialization completed for user {user_id}")
             
-            # Start inactivity check only when the browser is first initialized
+            # Start inactivity check only when the first browser is initialized
             if not self._inactivity_check_running:
                 # Create the task in an async context
                 self._inactivity_check_running = True
@@ -139,13 +159,12 @@ class BrowserService:
                 asyncio.create_task(self._check_inactivity())
                 logger.info("Browser inactivity check started")
         
-            # Update activity timestamp
-            self._last_activity_time = time.time()
+            # Update activity timestamp for this user
+            self._last_activity_times[user_id] = time.time()
             
-            return self._browser
+            return self._browsers[user_id]
         except Exception as e:
-            logger.error(f"Failed to initialize browser: {e}", exc_info=True)
-            self._browser = None
+            logger.error(f"Error initializing browser for user {user_id}: {e}")
             raise
 
     async def execute_search(self, query: str, task_type: str = "search", user_id: int = 1) -> str:
@@ -154,262 +173,396 @@ class BrowserService:
         
         Args:
             query: The search query or task description
-            task_type: Type of task (search/booking)
-            user_id: User identifier
+            task_type: Type of task (search, booking, etc.)
+            user_id: User ID for tracking browser instances
             
         Returns:
-            str: Search result or task output
+            str: Result of the search or task
         """
+        # Update activity timestamp for this user
+        self._last_activity_times[user_id] = time.time()
+        
         # Check if circuit breaker is open
         if self._circuit_open:
             current_time = time.time()
             if current_time - self._circuit_open_time < self._circuit_cooldown_period:
-                logger.warning(f"Circuit breaker is open. API is cooling down for {(self._circuit_open_time + self._circuit_cooldown_period - current_time) / 60:.1f} more minutes.")
-                return "I'm sorry, but our AI service is currently experiencing technical difficulties. Please try a simpler request or try again in a few minutes."
+                cooling_remaining = self._circuit_cooldown_period - (current_time - self._circuit_open_time)
+                logger.warning(f"Circuit breaker is open. Cooling down for {cooling_remaining:.1f} more seconds.")
+                return "I'm sorry, but our service is currently experiencing high demand. Please try again in a few minutes."
             else:
                 # Reset circuit breaker after cooldown period
-                logger.info("Circuit breaker cooldown period completed. Resetting circuit.")
+                logger.info("Circuit breaker cooldown period ended. Resetting circuit breaker.")
                 self._circuit_open = False
                 self._circuit_failure_count = 0
-        
-        retry_count = 0
-        max_retries = self.settings.MAX_RETRIES
-        max_anthropic_retries = 5  # Specific retries for Anthropic overload errors
-        anthropic_retry_delay = 15  # Increased initial delay from 10 to 15 seconds
         
         # Check if Anthropic circuit breaker is open
         if self._anthropic_circuit_open:
             current_time = time.time()
-            # Check if it's time to reset the circuit
-            if self._anthropic_circuit_open_time and (current_time - self._anthropic_circuit_open_time) > self._anthropic_circuit_reset_after:
-                logger.info("Resetting Anthropic circuit breaker after cooling period")
+            if current_time - self._anthropic_circuit_open_time < self._anthropic_circuit_reset_after:
+                cooling_remaining = self._anthropic_circuit_reset_after - (current_time - self._anthropic_circuit_open_time)
+                logger.warning(f"Anthropic API circuit breaker is open. Cooling down for {cooling_remaining:.1f} more seconds.")
+                return "I'm sorry, but our service is currently experiencing high demand with the AI provider. Please try again in a few minutes."
+            else:
+                # Reset Anthropic circuit breaker after cooldown period
+                logger.info("Anthropic API circuit breaker cooldown period ended. Resetting circuit breaker.")
                 self._anthropic_circuit_open = False
                 self._anthropic_failures = 0
-            else:
-                # Circuit is still open, return a friendly message
-                logger.warning("Anthropic API circuit breaker is open, skipping browser search")
-                return "I'm sorry, but our AI service is currently experiencing technical difficulties. Please try a simpler request or try again in a few minutes."
         
-        # Update activity timestamp for inactivity tracking
-        self._last_activity_time = time.time()
+        # Initialize result
+        result = ""
         
-        # Get the user's last messages for context
-        history = await MessageUtils().get_user_history(user_id)
-        history_context = ""
+        # Get user details for personalized prompts
+        user_details = await self._extract_user_details(user_id)
         
-        # Format the last few messages for context
-        if history:
-            history_context = "\n".join(
-                f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
-                for msg in history[-3:]  # Last 3 messages
-            )
+        # Track if we need to reset the browser
+        need_browser_reset = False
         
-        # Always close and reset the browser before starting a new search
-        # This ensures we start with a fresh browser instance each time
-        if self._browser is not None:
-            logger.info("Closing existing browser before starting new search")
+        # Keep track of retries
+        retries = 0
+        max_retries = self.settings.MAX_RETRIES
+        
+        # Keep track of the keep-alive task
+        keep_alive_task = None
+        
+        while retries <= max_retries:
             try:
-                await self._browser.close()
-            except Exception as e:
-                logger.warning(f"Error closing browser: {e}")
-            finally:
-                # Always set browser to None regardless of whether close succeeded
-                self._browser = None
-                # Reduced wait time from 2 seconds to 1 second
-                await asyncio.sleep(1)
-        
-        while retry_count < max_retries:
-            try:
-                # Always initialize a new browser instance for each search
-                logger.info("Initializing new browser instance for search")
-                await self.initialize_browser()
+                # Initialize browser if needed
+                if user_id not in self._browsers or self._browsers[user_id] is None:
+                    await self.initialize_browser(user_id)
                 
-                if self._browser is None:
-                    raise Exception("Failed to initialize browser")
+                # Generate task prompt
+                prompt = await self.generate_task_prompt(query, task_type, user_details.get("history_context", ""))
                 
-                # Update the activity timestamp to prevent timeout
-                self._last_activity_time = time.time()
-                
-                # Generate task prompt with history context
-                task_prompt = await self.generate_task_prompt(query, task_type, history_context)
-                
-                # Extract sensitive user details if needed for booking
-                sensitive_data = None
-                if task_type == "booking":
-                    sensitive_data = await self._extract_user_details(user_id)
-                
-                # Configure agent with the browser instance
+                # Create a new agent for this task
                 agent = Agent(
-                    task=task_prompt,
-                    llm=self.claude_llm,  # Use Claude for browser tasks
-                    browser=self._browser,  # Use the browser instance directly
-                    sensitive_data=sensitive_data
+                    browser=self._browsers[user_id],
+                    llm=self.claude_llm,
+                    task=prompt
                 )
                 
-                logger.info(f"Running browser agent for task: {task_type}")
-                
-                # Check if we're running on Railway and should disable GIF creation
-                is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
-                disable_gif = os.environ.get('DISABLE_GIF_CREATION', 'false').lower() == 'true'
-                
-                # Automatically disable GIF creation on Railway to avoid font issues
-                if is_railway or disable_gif:
-                    if is_railway:
-                        logger.info("Running on Railway - automatically disabling GIF creation")
-                    else:
-                        logger.info("GIF creation disabled by environment variable")
-                
-                # Create a background task to keep updating the activity timestamp while the agent is running
+                # Start a task to keep the browser active during execution
                 async def keep_browser_active():
-                    update_count = 0
-                    while self._browser is not None:
-                        self._last_activity_time = time.time()
-                        
-                        # Only log occasionally to reduce log spam
-                        update_count += 1
-                        if update_count % 5 == 0:  # Log only every 5th update
-                            logger.debug(f"Updating browser activity timestamp (update #{update_count})")
-                        
-                        # Update less frequently - every 10 minutes instead of 5 minutes
-                        await asyncio.sleep(600)
+                    try:
+                        while True:
+                            # Update activity timestamp every 5 minutes
+                            await asyncio.sleep(300)
+                            self._last_activity_times[user_id] = time.time()
+                            logger.debug(f"Updated browser activity timestamp for user {user_id}")
+                    except asyncio.CancelledError:
+                        logger.debug("Keep-alive task cancelled")
+                    except Exception as e:
+                        logger.error(f"Error in keep_browser_active: {e}")
                 
                 # Start the keep-alive task
                 keep_alive_task = asyncio.create_task(keep_browser_active())
                 
+                # Run the agent with increased max_steps
                 try:
-                    # Run the agent with increased max_steps
-                    agent_result = await agent.run(max_steps=12, disable_history=disable_gif)
+                    # Check if we're on Railway or if GIF creation is disabled
+                    is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
+                    disable_gif = os.environ.get('DISABLE_GIF_CREATION', 'false').lower() == 'true'
                     
-                    # Reset Anthropic failure counter on success
-                    self.__class__._anthropic_failures = 0
+                    # Run the agent with appropriate parameters
+                    if is_railway or disable_gif:
+                        agent_result = await agent.run(max_steps=12, disable_history=True)
+                    else:
+                        agent_result = await agent.run(max_steps=12)
                     
                     # Extract the final result
                     result = self.extract_final_result(agent_result)
-                    logger.info(f"Search completed successfully for user {user_id}")
                     
-                    # Cancel the keep-alive task when agent is done
-                    keep_alive_task.cancel()
-                    try:
-                        await keep_alive_task
-                    except asyncio.CancelledError:
-                        pass
+                    # Reset Anthropic failures counter on success
+                    self._anthropic_failures = 0
                     
-                    # Update activity timestamp after successful execution
-                    self._last_activity_time = time.time()
+                    # Reset circuit failure count on success
+                    self._circuit_failure_count = 0
                     
-                    # Don't automatically close the browser after successful execution
-                    # This improves performance by allowing browser reuse
-                    # Only log that execution completed
-                    logger.info("Search completed successfully")
+                    # No need to reset browser after successful execution
+                    need_browser_reset = False
                     
-                    return result
+                    # Break out of retry loop on success
+                    break
                     
                 except Exception as e:
-                    # Cancel the keep-alive task when agent fails
-                    keep_alive_task.cancel()
-                    try:
-                        await keep_alive_task
-                    except asyncio.CancelledError:
-                        pass
-                        
-                    logger.error(f"Error during search execution: {str(e)}")
-                    error_message = str(e).lower()
+                    error_str = str(e).lower()
                     
-                    # Check for overload conditions - expanded pattern matching
-                    if any(pattern in error_message for pattern in [
-                        "overloaded", "502", "too many requests", "rate limit", 
-                        "capacity", "busy", "unavailable", "429", "503", "504"
-                    ]):
+                    # Check for Anthropic API overload
+                    if any(term in error_str for term in ["overloaded", "502", "too many requests", "rate limit"]):
+                        self._anthropic_failures += 1
+                        logger.warning(f"Anthropic API overload detected. Failure count: {self._anthropic_failures}")
+                        
+                        if self._anthropic_failures >= self._anthropic_failure_threshold:
+                            logger.warning("Anthropic API circuit breaker opened due to consecutive failures")
+                            self._anthropic_circuit_open = True
+                            self._anthropic_circuit_open_time = time.time()
+                            return "I'm sorry, but our AI service is currently experiencing high demand. Please try again in a few minutes."
+                        
+                        # Increment general circuit failure count as well
                         self._circuit_failure_count += 1
-                        logger.warning(f"Potential API overload detected. Failure count: {self._circuit_failure_count}/{self._circuit_reset_threshold}")
                         
-                        if self._circuit_failure_count >= self._circuit_reset_threshold:
-                            self._circuit_open = True
-                            self._circuit_open_time = time.time()
-                            logger.warning(f"Circuit breaker opened. API cooling down for {self._circuit_cooldown_period / 60} minutes.")
-                            
-                            # Force close browser when circuit opens
-                            await self.force_close_browser()
-                            return "I'm sorry, but our AI service is currently experiencing high demand. Please try a simpler request or try again in a few minutes."
+                        # Need to reset browser after API overload
+                        need_browser_reset = True
+                        
+                        # Provide a user-friendly error message
+                        result = "I'm sorry, but I encountered an issue with the search. The service might be experiencing high demand. Let me try again."
                     
-                    # Retry logic for transient errors
-                    if retry_count < max_retries:
-                        retry_count += 1
-                        # Improved backoff with increased initial delay and more jitter
-                        wait_time = min(5 * (2 ** retry_count) + random.uniform(0, 5), 120)  # Max 2 minutes
-                        logger.info(f"Retrying search (attempt {retry_count}/{max_retries}) after {wait_time:.2f}s")
+                    # Check for other API overload patterns
+                    elif any(term in error_str for term in ["timeout", "connection", "network", "socket"]):
+                        self._circuit_failure_count += 1
+                        logger.warning(f"API connection issue detected. Failure count: {self._circuit_failure_count}")
                         
-                        # Provide more detailed error message for debugging
-                        logger.debug(f"Error details for retry {retry_count}: {error_message}")
+                        # Need to reset browser after connection issues
+                        need_browser_reset = True
                         
-                        await asyncio.sleep(wait_time)
-                        
-                        # Reset browser for next attempt
-                        await self.cleanup()
-                        await self.initialize_browser()
-                        continue
+                        # Provide a user-friendly error message
+                        result = "I'm sorry, but I encountered a connection issue. Let me try again."
                     
-                    # If we've exhausted retries, return a user-friendly error message
-                    logger.error(f"Failed to execute search after {max_retries} retries")
-                    
-                    # Provide more specific error messages based on error type
-                    if "timeout" in error_message:
-                        return "I'm sorry, but the request took too long to process. Please try a simpler request or try again later."
-                    elif "memory" in error_message or "resource" in error_message:
-                        return "I'm sorry, but your request was too complex for our system to handle. Please try a simpler request."
+                    # Handle other errors
                     else:
-                        return "I'm sorry, but I encountered an error while processing your request. Please try again later or try a different request."
+                        logger.error(f"Error running agent: {e}")
+                        need_browser_reset = True
+                        result = f"I encountered an error: {str(e)}"
+                    
+                    # Check if we should open the circuit breaker
+                    if self._circuit_failure_count >= self._circuit_reset_threshold:
+                        logger.warning("Circuit breaker opened due to consecutive failures")
+                        self._circuit_open = True
+                        self._circuit_open_time = time.time()
+                        return "I'm sorry, but our service is currently experiencing technical difficulties. Please try again in a few minutes."
             
             except Exception as e:
-                # Handle any exceptions that occur outside the agent execution
-                logger.error(f"Error during search setup: {str(e)}")
-                
-                # Retry logic for setup errors
-                if retry_count < max_retries:
-                    retry_count += 1
-                    wait_time = min(2 ** retry_count + random.uniform(0, 1), 30)  # Max 30 seconds for setup errors
-                    logger.info(f"Retrying search setup (attempt {retry_count}/{max_retries}) after {wait_time:.2f}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                
-                # If we've exhausted retries, return an error
-                return f"I'm sorry, I encountered an error while setting up the search. Please try again later. Error: {str(e)}"
+                logger.error(f"Error in execute_search for user {user_id}: {e}")
+                need_browser_reset = True
+                result = f"I encountered an error: {str(e)}"
+            
+            finally:
+                # Cancel the keep-alive task
+                if keep_alive_task:
+                    keep_alive_task.cancel()
+                    try:
+                        await keep_alive_task
+                    except asyncio.CancelledError:
+                        pass
+            
+            # Reset browser if needed before retrying
+            if need_browser_reset:
+                try:
+                    logger.info(f"Resetting browser for user {user_id} before retry")
+                    await self.cleanup(user_id=user_id, force=True)
+                    await asyncio.sleep(1)  # Short delay before retry
+                except Exception as e:
+                    logger.error(f"Error resetting browser: {e}")
+            
+            # Increment retry counter
+            retries += 1
+            
+            # If we've reached max retries, break out of the loop
+            if retries > max_retries:
+                logger.warning(f"Max retries ({max_retries}) reached for user {user_id}")
+                if not result:
+                    result = "I'm sorry, but I was unable to complete your request after multiple attempts. Please try again later."
+                break
+            
+            # Exponential backoff with jitter for retries
+            if need_browser_reset and retries <= max_retries:
+                # Start with 2 seconds, then 4, 8, etc.
+                delay = 2 ** retries
+                # Add jitter (±25%)
+                jitter = delay * 0.25 * (random.random() * 2 - 1)
+                delay = max(1, delay + jitter)
+                logger.info(f"Retrying in {delay:.1f} seconds (attempt {retries}/{max_retries})")
+                await asyncio.sleep(delay)
         
-        # This should never be reached, but just in case
-        return "An unexpected error occurred. Please try again."
+        # Update activity timestamp after execution
+        self._last_activity_times[user_id] = time.time()
+        
+        return result
 
-    async def cleanup(self, force=False):
+    async def cleanup(self, user_id: int = None, force=False):
         """
-        Cleanup browser resources.
+        Clean up browser resources for a specific user or all users.
         
         Args:
-            force: Whether to force cleanup even if not initiated by inactivity check
+            user_id: User ID to clean up, or None for all users
+            force: Force cleanup even if browser is active
         """
         try:
-            if self._browser is not None:
-                if force:
-                    logger.info("Forcing browser cleanup due to explicit request")
+            # If user_id is provided, clean up only that user's browser
+            if user_id is not None:
+                if user_id in self._browsers and self._browsers[user_id] is not None:
+                    logger.info(f"Cleaning up browser for user {user_id}")
+                    try:
+                        await self._browsers[user_id].close()
+                    except Exception as e:
+                        logger.warning(f"Error closing browser for user {user_id}: {e}")
+                    finally:
+                        self._browsers[user_id] = None
+                        if user_id in self._last_activity_times:
+                            del self._last_activity_times[user_id]
+                        if user_id in self._current_contexts:
+                            del self._current_contexts[user_id]
                 else:
-                    logger.info("Browser cleanup due to inactivity timeout")
-                
-                try:
-                    await self._browser.close()
-                    logger.info("Browser closed successfully")
-                except Exception as e:
-                    logger.error(f"Error during browser close: {e}", exc_info=True)
-                finally:
-                    # Always set browser to None regardless of whether close succeeded
-                    self._browser = None
-                    logger.info("Browser reference set to None")
+                    logger.debug(f"No browser instance to clean up for user {user_id}")
             else:
-                logger.info("Browser cleanup called but browser was already None")
+                # Clean up all browser instances
+                logger.info("Cleaning up all browser instances")
+                for uid, browser in list(self._browsers.items()):
+                    if browser is not None:
+                        try:
+                            await browser.close()
+                        except Exception as e:
+                            logger.warning(f"Error closing browser for user {uid}: {e}")
+                        finally:
+                            self._browsers[uid] = None
+                
+                # Clear all tracking dictionaries
+                self._browsers.clear()
+                self._last_activity_times.clear()
+                self._current_contexts.clear()
+                
+                logger.info("All browser instances cleaned up")
+        
         except Exception as e:
-            logger.error(f"Error during browser cleanup: {e}", exc_info=True)
-            # Force reset even if error
-            self._browser = None
+            logger.error(f"Error in cleanup: {e}")
 
-    @staticmethod
-    async def generate_task_prompt(query: str, task_type: str, history_context: str = "") -> str:
+    async def force_close_browser(self, user_id: int = None):
+        """
+        Force close browser instance(s) without waiting for graceful cleanup.
+        
+        Args:
+            user_id: User ID to force close, or None for all users
+        """
+        try:
+            if user_id is not None:
+                # Force close specific user's browser
+                if user_id in self._browsers and self._browsers[user_id] is not None:
+                    logger.info(f"Force closing browser for user {user_id}")
+                    try:
+                        await self._browsers[user_id].close()
+                    except Exception as e:
+                        logger.warning(f"Error force closing browser for user {user_id}: {e}")
+                    finally:
+                        self._browsers[user_id] = None
+                        if user_id in self._last_activity_times:
+                            del self._last_activity_times[user_id]
+                        if user_id in self._current_contexts:
+                            del self._current_contexts[user_id]
+            else:
+                # Force close all browsers
+                for uid, browser in list(self._browsers.items()):
+                    if browser is not None:
+                        try:
+                            await browser.close()
+                        except Exception as e:
+                            logger.warning(f"Error force closing browser for user {uid}: {e}")
+                
+                # Clear all tracking dictionaries
+                self._browsers.clear()
+                self._last_activity_times.clear()
+                self._current_contexts.clear()
+                
+                logger.info("All browser instances force closed")
+        
+        except Exception as e:
+            logger.error(f"Error in force_close_browser: {e}")
+
+    async def extend_timeout(self, user_id: int = 1, additional_seconds=1800):
+        """
+        Extend the inactivity timeout for a specific user's browser.
+        
+        Args:
+            user_id: User ID to extend timeout for
+            additional_seconds: Additional seconds to add to timeout
+        """
+        try:
+            # Update the activity timestamp to effectively extend the timeout
+            if user_id in self._last_activity_times:
+                self._last_activity_times[user_id] = time.time()
+                logger.info(f"Extended timeout for user {user_id} by updating activity timestamp")
+            else:
+                # If no activity timestamp exists, create one
+                self._last_activity_times[user_id] = time.time()
+                logger.info(f"Created new activity timestamp for user {user_id}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error extending timeout for user {user_id}: {e}")
+            return False
+
+    def __init__(self, settings):
+        """Initialize the browser service"""
+        self.settings = settings
+        self.claude_llm = self._initialize_claude_llm()
+        self._browser_config = self._initialize_browser_config()
+        logger.info("BrowserService initialized")
+        # Don't call asyncio.create_task here - it requires a running event loop
+        # The browser will be initialized when needed in execute_search
+
+    async def reset_circuit_breaker(self):
+        """Reset the circuit breaker state."""
+        logger.info("Manually resetting circuit breaker state")
+        self._circuit_open = False
+        self._circuit_open_time = None
+        self._circuit_failure_count = 0
+        self._anthropic_failures = 0
+        self._anthropic_circuit_open = False
+        self._anthropic_circuit_open_time = None
+        return True
+
+    async def _extract_user_details(self, user_id: int) -> Dict[str, Any]:
+        """
+        Extract user details and conversation history for personalized prompts.
+        
+        Args:
+            user_id: User ID to retrieve profile for
+            
+        Returns:
+            Dict: User details and history context
+        """
+        try:
+            # Initialize MessageUtils to get user profile and history
+            message_utils = MessageUtils()
+            user_details = {}
+            
+            # Get user profile info asynchronously
+            profile = await message_utils.get_user_profile(user_id)
+            booking_info = await message_utils.get_booking_info(user_id)
+            
+            # Combine profile and booking info, with booking info taking precedence
+            combined_info = {**profile, **booking_info}
+            
+            # Map the user data to the expected keys used in prompts
+            if 'name' in combined_info:
+                user_details['user_name'] = combined_info['name']
+            
+            if 'email' in combined_info:
+                user_details['user_email'] = combined_info['email']
+                
+            if 'phone' in combined_info:
+                user_details['user_phone'] = combined_info['phone']
+            
+            # Get the user's last messages for context
+            history = await message_utils.get_user_history(user_id)
+            history_context = ""
+            
+            # Format the last few messages for context
+            if history:
+                history_context = "\n".join(
+                    f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+                    for msg in history[-3:]  # Last 3 messages
+                )
+            
+            user_details['history_context'] = history_context
+            
+            logger.info(f"Extracted user details for user {user_id}: {list(user_details.keys())}")
+            return user_details
+            
+        except Exception as e:
+            logger.error(f"Error extracting user details: {e}")
+            # Return empty dict on error - agent will handle missing info
+            return {'history_context': ''}
+
+    async def generate_task_prompt(self, query: str, task_type: str, history_context: str = "") -> str:
         """
         Generates a task prompt for the browser agent.
         
@@ -498,8 +651,7 @@ class BrowserService:
                     time = f"{hour}:{minutes}"
                 else:
                     time = f"{match.group(1)}:00"
-                break
-                
+        
         # If we couldn't extract, check for references to "same time" or "same party size"
         if "same time" in query.lower() or "same party" in query.lower() or "same" in query.lower():
             # Look for previous reservation details in conversation history
@@ -804,9 +956,9 @@ class BrowserService:
                 return str(agent_result.message)
 
             return str(agent_result)
-
+        
         except Exception as e:
-            logger.error(f"Error extracting final result: {e}", exc_info=True)
+            logger.error(f"Error extracting final result: {e}")
             # Return a more helpful message with any information we can extract
             try:
                 if hasattr(agent_result, 'all_results') and agent_result.all_results:
@@ -826,118 +978,3 @@ class BrowserService:
                 pass
                 
             return f"I encountered an error while processing the search results: {str(e)}. Please try again with a more specific query."
-
-    async def _extract_user_details(self, user_id: int) -> Dict[str, str]:
-        """
-        Extract sensitive user details for booking.
-        
-        Args:
-            user_id: User ID to retrieve profile for
-            
-        Returns:
-            Dict[str, str]: Sensitive user data
-        """
-        try:
-            # Initialize MessageUtils to get user profile and booking info
-            message_utils = MessageUtils()
-            sensitive_data = {}
-            
-            # Get user profile info asynchronously
-            profile = await message_utils.get_user_profile(user_id)
-            booking_info = await message_utils.get_booking_info(user_id)
-            
-            # Combine profile and booking info, with booking info taking precedence
-            combined_info = {**profile, **booking_info}
-            
-            # Map the user data to the expected keys used in prompts
-            if 'name' in combined_info:
-                sensitive_data['user_name'] = combined_info['name']
-            
-            if 'email' in combined_info:
-                sensitive_data['user_email'] = combined_info['email']
-                
-            if 'phone' in combined_info:
-                sensitive_data['user_phone'] = combined_info['phone']
-            
-            logger.info(f"Extracted sensitive user details for booking: {list(sensitive_data.keys())}")
-            return sensitive_data
-            
-        except Exception as e:
-            logger.error(f"Error extracting user details: {e}", exc_info=True)
-            # Return empty dict on error - agent will handle missing info
-            return {}
-
-    # Additional method to close browser resources explicitly when needed
-    async def force_close_browser(self):
-        """
-        Force close the browser and reset the instance to None.
-        This is a more aggressive version of cleanup that ensures the browser is closed.
-        """
-        logger.info("Force closing browser")
-        try:
-            if self._browser is not None:
-                try:
-                    await self._browser.close()
-                    logger.info("Browser force closed successfully")
-                except Exception as e:
-                    logger.error(f"Error during force browser close: {e}", exc_info=True)
-                finally:
-                    # Always set browser to None regardless of whether close succeeded
-                    self._browser = None
-                    logger.info("Browser reference force reset to None")
-                    await asyncio.sleep(2)  # Wait a bit after closing
-            else:
-                logger.info("Force close called but browser was already None")
-            return True
-        except Exception as e:
-            logger.error(f"Unexpected error during force browser close: {e}", exc_info=True)
-            # Force reset even if error
-            self._browser = None
-            return False
-
-    async def extend_timeout(self, additional_seconds=1800):
-        """
-        Extend the browser inactivity timeout by the specified number of seconds.
-        Useful for long-running tasks.
-        
-        Args:
-            additional_seconds: Number of seconds to extend the timeout by
-        """
-        try:
-            # Update the activity timestamp to reset the timeout countdown
-            self._last_activity_time = time.time()
-            
-            # Temporarily increase the inactivity timeout
-            original_timeout = self._inactivity_timeout
-            self._inactivity_timeout += additional_seconds
-            
-            logger.info(f"Extended browser timeout from {original_timeout} to {self._inactivity_timeout} seconds ({self._inactivity_timeout/60:.1f} minutes)")
-            
-            return True
-        except Exception as e:
-            logger.error(f"Error extending browser timeout: {e}", exc_info=True)
-            return False
-
-    async def reset_circuit_breaker(self):
-        """Reset the circuit breaker state."""
-        logger.info("Manually resetting circuit breaker state")
-        self._circuit_open = False
-        self._circuit_open_time = None
-        self._circuit_failure_count = 0
-        self.__class__._anthropic_failures = 0
-        self.__class__._anthropic_circuit_open = False
-        self.__class__._anthropic_circuit_open_time = None
-        return True
-
-    def __init__(self, settings):
-        self.settings = settings
-        self.browser = None
-        self.page = None
-        self._last_activity_time = time.time()
-        self._browser_lock = asyncio.Lock()
-        
-        # Initialize the browser
-        asyncio.create_task(self.initialize_browser())
-        
-        # Start the inactivity checker
-        asyncio.create_task(self.check_inactivity())

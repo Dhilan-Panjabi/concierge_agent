@@ -282,6 +282,44 @@ def main():
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     try:
+        # Start a simple HTTP server for health checks
+        def start_health_check_server():
+            try:
+                from http.server import HTTPServer, BaseHTTPRequestHandler
+                
+                class HealthCheckHandler(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        if self.path == "/telegram/webhook":
+                            self.send_response(200)
+                            self.send_header("Content-type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write(b"OK")
+                        else:
+                            self.send_response(404)
+                            self.send_header("Content-type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write(b"Not Found")
+                    
+                    def log_message(self, format, *args):
+                        # Suppress log messages for health checks
+                        if args[0].startswith("GET /telegram/webhook"):
+                            return
+                        logger.info("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
+                
+                # Start the server on port 8080
+                server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+                logger.info("Starting health check server on port 8080")
+                server.serve_forever()
+            except Exception as e:
+                logger.error(f"Error starting health check server: {e}")
+        
+        # Start the health check server in a separate thread
+        import threading
+        health_check_thread = threading.Thread(target=start_health_check_server, daemon=True)
+        health_check_thread.start()
+        logger.info("Health check server thread started")
+        
+        # Start the bot
         bot = BookingBot()
         bot.run()
     except KeyboardInterrupt:

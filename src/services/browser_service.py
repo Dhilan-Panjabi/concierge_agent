@@ -149,8 +149,32 @@ class BrowserService:
             await self._ensure_playwright_browsers()
             
             logger.info(f"Initializing new browser instance for user {user_id}")
+            
+            # Check if we're using Steel.dev CDP connection
+            using_steel = (self.browser_config.get('browserless', False) and 
+                          hasattr(self._browser_config, 'cdp_url') and 
+                          'steel.dev' in self._browser_config.cdp_url)
+            
+            if using_steel:
+                # For Steel.dev, add a custom session ID for each user to help with tracking
+                import uuid
+                session_id = str(uuid.uuid4())
+                
+                # Update the cdp_url to include the session ID
+                current_cdp_url = self._browser_config.cdp_url
+                if '?' in current_cdp_url:
+                    self._browser_config.cdp_url = f"{current_cdp_url}&sessionId={session_id}"
+                else:
+                    self._browser_config.cdp_url = f"{current_cdp_url}?sessionId={session_id}"
+                
+                # Store the session ID for later reference
+                self._current_contexts[user_id] = {'session_id': session_id}
+                logger.info(f"Created Steel.dev session with ID {session_id} for user {user_id}")
+            
+            # Initialize the browser with configured settings
             self._browsers[user_id] = Browser(self._browser_config)
-            # Reduced wait time from 5 seconds to 3 seconds
+            
+            # Wait for browser to initialize
             await asyncio.sleep(3)
             logger.info(f"Browser initialization completed for user {user_id}")
             
@@ -488,6 +512,28 @@ class BrowserService:
                     logger.info(f"Cleaning up browser for user {user_id}")
                     try:
                         await self._browsers[user_id].close()
+                        
+                        # For Steel.dev sessions, release the session via API if possible
+                        if (user_id in self._current_contexts and 
+                            'session_id' in self._current_contexts[user_id] and
+                            self.browser_config.get('browserless', False) and
+                            self.settings.STEEL_API_KEY):
+                            
+                            session_id = self._current_contexts[user_id]['session_id']
+                            logger.info(f"Releasing Steel.dev session {session_id} for user {user_id}")
+                            
+                            # Try using Python SDK if available
+                            try:
+                                # Try to import Steel SDK
+                                from steel import Steel
+                                steel_client = Steel(steel_api_key=self.settings.STEEL_API_KEY)
+                                steel_client.sessions.release(session_id)
+                                logger.info(f"Successfully released Steel.dev session {session_id}")
+                            except ImportError:
+                                logger.warning("Steel SDK not available for releasing session")
+                            except Exception as steel_err:
+                                logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
+                            
                     except Exception as e:
                         logger.warning(f"Error closing browser for user {user_id}: {e}")
                     finally:
@@ -505,6 +551,27 @@ class BrowserService:
                     if browser is not None:
                         try:
                             await browser.close()
+                            
+                            # Release Steel.dev session if applicable
+                            if (uid in self._current_contexts and 
+                                'session_id' in self._current_contexts[uid] and
+                                self.browser_config.get('browserless', False) and
+                                self.settings.STEEL_API_KEY):
+                                
+                                session_id = self._current_contexts[uid]['session_id']
+                                logger.info(f"Releasing Steel.dev session {session_id} for user {uid}")
+                                
+                                try:
+                                    # Try to import Steel SDK
+                                    from steel import Steel
+                                    steel_client = Steel(steel_api_key=self.settings.STEEL_API_KEY)
+                                    steel_client.sessions.release(session_id)
+                                    logger.info(f"Successfully released Steel.dev session {session_id}")
+                                except ImportError:
+                                    logger.warning("Steel SDK not available for releasing session")
+                                except Exception as steel_err:
+                                    logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
+                            
                         except Exception as e:
                             logger.warning(f"Error closing browser for user {uid}: {e}")
                         finally:
@@ -534,6 +601,27 @@ class BrowserService:
                     logger.info(f"Force closing browser for user {user_id}")
                     try:
                         await self._browsers[user_id].close()
+                        
+                        # Release Steel.dev session if applicable
+                        if (user_id in self._current_contexts and 
+                            'session_id' in self._current_contexts[user_id] and
+                            self.browser_config.get('browserless', False) and
+                            self.settings.STEEL_API_KEY):
+                            
+                            session_id = self._current_contexts[user_id]['session_id']
+                            logger.info(f"Force releasing Steel.dev session {session_id} for user {user_id}")
+                            
+                            try:
+                                # Use Steel SDK
+                                from steel import Steel
+                                steel_client = Steel(steel_api_key=self.settings.STEEL_API_KEY)
+                                steel_client.sessions.release(session_id)
+                                logger.info(f"Successfully released Steel.dev session {session_id}")
+                            except ImportError:
+                                logger.warning("Steel SDK not available for releasing session")
+                            except Exception as steel_err:
+                                logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
+                        
                     except Exception as e:
                         logger.warning(f"Error force closing browser for user {user_id}: {e}")
                     finally:
@@ -548,6 +636,27 @@ class BrowserService:
                     if browser is not None:
                         try:
                             await browser.close()
+                            
+                            # Release Steel.dev session if applicable
+                            if (uid in self._current_contexts and 
+                                'session_id' in self._current_contexts[uid] and
+                                self.browser_config.get('browserless', False) and
+                                self.settings.STEEL_API_KEY):
+                                
+                                session_id = self._current_contexts[uid]['session_id']
+                                logger.info(f"Force releasing Steel.dev session {session_id} for user {uid}")
+                                
+                                try:
+                                    # Use Steel SDK
+                                    from steel import Steel
+                                    steel_client = Steel(steel_api_key=self.settings.STEEL_API_KEY)
+                                    steel_client.sessions.release(session_id)
+                                    logger.info(f"Successfully released Steel.dev session {session_id}")
+                                except ImportError:
+                                    logger.warning("Steel SDK not available for releasing session")
+                                except Exception as steel_err:
+                                    logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
+                            
                         except Exception as e:
                             logger.warning(f"Error force closing browser for user {uid}: {e}")
                 
@@ -625,13 +734,14 @@ class BrowserService:
             
             # Add browserless configuration if enabled
             if self.browser_config.get('browserless', False):
-                # Set CDP URL for browser-use library
-                self.browser_config_obj.cdp_url = self.browser_config.get('browserless_url')
-                
-                # Set Steel API key for authentication
+                # Configure CDP connection using Steel.dev's recommended approach
                 if self.settings.STEEL_API_KEY:
-                    self.browser_config_obj.token = self.settings.STEEL_API_KEY
-                    self.logger.info("Steel API key configured for browser automation")
+                    # Use the WebSocket endpoint with apiKey as recommended in the Steel.dev docs
+                    self.browser_config_obj.cdp_url = f"wss://connect.steel.dev?apiKey={self.settings.STEEL_API_KEY}"
+                    self.logger.info("Steel API key configured for Chrome DevTools Protocol connection")
+                else:
+                    # Fall back to the provided browserless URL if no Steel API key
+                    self.browser_config_obj.cdp_url = self.browser_config.get('browserless_url')
                 
                 self.logger.info(f"Browserless configuration added: CDP URL={self.browser_config_obj.cdp_url}")
             

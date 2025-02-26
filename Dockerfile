@@ -14,9 +14,6 @@ RUN apt-get update && apt-get install -y \
     fonts-dejavu \
     fonts-dejavu-core \
     fonts-dejavu-extra \
-    ttf-dejavu \
-    ttf-dejavu-core \
-    ttf-dejavu-extra \
     fonts-freefont-ttf \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,6 +30,8 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV DISPLAY=:99
+ENV DISABLE_GIF_CREATION=true
+ENV RAILWAY_ENVIRONMENT=production
 
 # Run the bot
 CMD ["python", "main.py"]

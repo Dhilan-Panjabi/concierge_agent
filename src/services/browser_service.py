@@ -145,6 +145,9 @@ class BrowserService:
                     # Reduced wait time from 2 seconds to 1 second
                     await asyncio.sleep(1)
             
+            # Check if we need to install Playwright browsers
+            await self._ensure_playwright_browsers()
+            
             logger.info(f"Initializing new browser instance for user {user_id}")
             self._browsers[user_id] = Browser(self._browser_config)
             # Reduced wait time from 5 seconds to 3 seconds
@@ -166,6 +169,66 @@ class BrowserService:
         except Exception as e:
             logger.error(f"Error initializing browser for user {user_id}: {e}")
             raise
+
+    async def _ensure_playwright_browsers(self):
+        """Ensure Playwright browsers are installed"""
+        try:
+            # Check if we're running on Railway
+            is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
+            
+            # Only attempt to install browsers if we're on Railway and haven't tried before
+            if is_railway and not hasattr(self, '_playwright_browsers_checked'):
+                logger.info("Checking Playwright browsers on Railway...")
+                
+                # Mark that we've checked for browsers
+                self._playwright_browsers_checked = True
+                
+                # Try to create a browser to see if it works
+                try:
+                    test_config = BrowserConfig(headless=True)
+                    test_browser = Browser(test_config)
+                    await test_browser.close()
+                    logger.info("Playwright browsers are already installed")
+                except Exception as e:
+                    if "Executable doesn't exist" in str(e) or "Please run the following command" in str(e):
+                        logger.warning("Playwright browsers not installed, attempting to install...")
+                        
+                        # Try to install browsers using subprocess
+                        import subprocess
+                        try:
+                            # Run the playwright install command
+                            process = subprocess.Popen(
+                                ["playwright", "install", "chromium"],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            stdout, stderr = process.communicate(timeout=300)  # 5 minute timeout
+                            
+                            if process.returncode == 0:
+                                logger.info("Successfully installed Playwright browsers")
+                            else:
+                                logger.error(f"Failed to install Playwright browsers: {stderr.decode()}")
+                                
+                            # Also install dependencies
+                            process = subprocess.Popen(
+                                ["playwright", "install-deps", "chromium"],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            stdout, stderr = process.communicate(timeout=300)  # 5 minute timeout
+                            
+                            if process.returncode == 0:
+                                logger.info("Successfully installed Playwright dependencies")
+                            else:
+                                logger.error(f"Failed to install Playwright dependencies: {stderr.decode()}")
+                                
+                        except Exception as install_error:
+                            logger.error(f"Error installing Playwright browsers: {install_error}")
+                    else:
+                        # Some other error occurred
+                        logger.error(f"Error checking Playwright browsers: {e}")
+        except Exception as e:
+            logger.error(f"Error in _ensure_playwright_browsers: {e}")
 
     async def execute_search(self, query: str, task_type: str = "search", user_id: int = 1) -> str:
         """
@@ -286,8 +349,40 @@ class BrowserService:
                 except Exception as e:
                     error_str = str(e).lower()
                     
+                    # Check for Playwright browser installation issues
+                    if "executable doesn't exist" in error_str or "please run the following command" in error_str:
+                        logger.warning("Playwright browser installation issue detected")
+                        
+                        # Try to install browsers
+                        try:
+                            # Force browser reset
+                            need_browser_reset = True
+                            
+                            # Try to install browsers using subprocess
+                            import subprocess
+                            logger.info("Attempting to install Playwright browsers...")
+                            
+                            # Run the playwright install command
+                            process = subprocess.Popen(
+                                ["playwright", "install", "chromium"],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            stdout, stderr = process.communicate(timeout=300)  # 5 minute timeout
+                            
+                            if process.returncode == 0:
+                                logger.info("Successfully installed Playwright browsers")
+                            else:
+                                logger.error(f"Failed to install Playwright browsers: {stderr.decode()}")
+                            
+                            # Provide a user-friendly error message
+                            result = "I'm sorry, but I encountered an issue with the browser. Please try again in a moment."
+                        except Exception as install_error:
+                            logger.error(f"Error installing Playwright browsers: {install_error}")
+                            result = "I'm sorry, but I encountered a technical issue. Please try again later."
+                    
                     # Check for Anthropic API overload
-                    if any(term in error_str for term in ["overloaded", "502", "too many requests", "rate limit"]):
+                    elif any(term in error_str for term in ["overloaded", "502", "too many requests", "rate limit"]):
                         self._anthropic_failures += 1
                         logger.warning(f"Anthropic API overload detected. Failure count: {self._anthropic_failures}")
                         

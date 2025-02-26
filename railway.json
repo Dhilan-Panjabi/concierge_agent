@@ -8,6 +8,8 @@
     "numReplicas": 1,
     "startCommand": "python main.py",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "healthcheckPath": "/telegram/webhook",
+    "healthcheckTimeout": 10
   }
 } 

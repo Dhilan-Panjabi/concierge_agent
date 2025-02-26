@@ -66,9 +66,10 @@ ENV DISPLAY=:99
 ENV DISABLE_GIF_CREATION=true
 ENV RAILWAY_ENVIRONMENT=production
 ENV USE_WEBHOOK=true
+ENV PORT=8080
 
 # Explicitly expose ports
-# Port 8080 for health checks
+# Port 8080 for health checks and main application
 EXPOSE 8080
 # Port 8443 for Telegram webhook
 EXPOSE 8443

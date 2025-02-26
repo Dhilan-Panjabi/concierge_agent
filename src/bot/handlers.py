@@ -18,12 +18,242 @@ NAME, EMAIL, PHONE, CONFIRMATION_CODE, BROWSER_CLEANUP = range(5)  # Updated sta
 PROFILE_NAME, PROFILE_EMAIL, PROFILE_PHONE = range(10, 13)  # Profile states
 
 class MessageHandler:
-    """Handles all incoming messages and their processing"""
+    """Handles incoming messages and user interactions"""
 
-    def __init__(self, browser_service: BrowserService, ai_service: AIService):
+    def __init__(self, browser_service, ai_service):
+        """Initialize the message handler with required services"""
         self.browser_service = browser_service
         self.ai_service = ai_service
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)  # Ensure logs are visible
+        self.logger.info("MessageHandler initialized")
         self.message_utils = MessageUtils()
+
+    async def process_message(self, update, context):
+        """Process an incoming message and generate a response"""
+        try:
+            # Extract message details
+            user_id = update.effective_user.id
+            message_text = update.message.text
+            
+            self.logger.info(f"Processing message from user {user_id}: '{message_text}'")
+            
+            # Check if the message contains an intent that requires web browsing
+            if self._requires_web_browsing(message_text):
+                self.logger.info(f"Message requires web browsing: {message_text}")
+                # Process as a web search query
+                return await self._process_web_query(message_text, user_id, context)
+            else:
+                self.logger.info(f"Processing as AI response: {message_text}")
+                # Process as a normal AI interaction
+                return await self._process_ai_query(message_text, user_id, context)
+        except Exception as e:
+            self.logger.error(f"Error processing message: {e}", exc_info=True)
+            return "I'm sorry, I encountered an error processing your message. Please try again."
+
+    def _requires_web_browsing(self, message_text):
+        """Determine if the message requires web browsing capabilities"""
+        # Define keywords that suggest the need for web browsing
+        web_keywords = [
+            "hotel", "find", "search", "book", "reservation", "restaurant", 
+            "price", "best", "cheap", "expensive", "check", "compare",
+            "flight", "travel", "vacation", "event", "ticket"
+        ]
+        
+        # Check if any keyword is in the message
+        contains_keyword = any(keyword in message_text.lower() for keyword in web_keywords)
+        self.logger.info(f"Message contains web browsing keywords: {contains_keyword}")
+        return contains_keyword
+
+    async def _process_web_query(self, query, user_id, context):
+        """Process a query that requires web browsing"""
+        self.logger.info(f"Processing web query: {query} for user {user_id}")
+        
+        try:
+            # Store query for context
+            MessageUtils.add_message(user_id, "user", query)
+            
+            # First message to user
+            loading_message = await context.bot.send_message(
+                chat_id=user_id,
+                text="🔍 I'm searching the web for information. This might take a moment..."
+            )
+            
+            # Handle different types of queries
+            if "hotel" in query.lower() or "stay" in query.lower() or "accommodation" in query.lower():
+                self.logger.info(f"Identified as hotel query: {query}")
+                # Extract location from query if possible
+                location = self._extract_location(query)
+                self.logger.info(f"Extracted location: {location}")
+                
+                # Call browser service to get hotel data
+                self.logger.info(f"Calling browser service for hotel search with query: {query}, location: {location}")
+                result = await self.browser_service.search_hotels(query, location)
+                self.logger.info(f"Received hotel search result type: {type(result)}")
+            
+            elif "restaurant" in query.lower() or "food" in query.lower() or "eat" in query.lower():
+                self.logger.info(f"Identified as restaurant query: {query}")
+                # Extract location and cuisine
+                location = self._extract_location(query)
+                cuisine = self._extract_cuisine(query)
+                price_range = self._extract_price_range(query)
+                
+                self.logger.info(f"Restaurant search params - location: {location}, cuisine: {cuisine}, price_range: {price_range}")
+                
+                # Call browser service to get restaurant data
+                self.logger.info("Calling browser service for restaurant search")
+                result = await self.browser_service.search_restaurants(location, cuisine, price_range)
+                self.logger.info(f"Received restaurant search result type: {type(result)}")
+            
+            else:
+                self.logger.info(f"General web search for query: {query}")
+                # General search
+                result = await self.browser_service.execute_search(query)
+                self.logger.info(f"Received general search result type: {type(result)}")
+            
+            # Log the first part of the result for debugging
+            if isinstance(result, str) and len(result) > 0:
+                preview = result[:min(200, len(result))]
+                self.logger.info(f"Search result preview: {preview}...")
+            else:
+                self.logger.info(f"Search result is not a string or is empty: {type(result)}")
+            
+            # Process result with AI to generate a user-friendly response
+            self.logger.info("Processing search results with AI service")
+            response = await self.ai_service.process_search_results(query, result)
+            self.logger.info(f"Generated AI response, length: {len(response) if response else 0}")
+            
+            # Store AI response for context
+            MessageUtils.add_message(user_id, "assistant", response)
+            
+            # Delete the loading message and send the final response
+            try:
+                await context.bot.delete_message(
+                    chat_id=user_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as e:
+                self.logger.error(f"Error deleting loading message: {e}")
+            
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"Error in web query processing: {e}", exc_info=True)
+            error_message = f"I'm sorry, I encountered an error while searching: {str(e)}. Please try again with a different query."
+            
+            # Store error response for context
+            MessageUtils.add_message(user_id, "assistant", error_message)
+            
+            return error_message
+
+    def _extract_location(self, query):
+        """Extract location from query text"""
+        # Simple extraction based on common patterns
+        location_patterns = [
+            r"in ([A-Za-z\s]+)",
+            r"at ([A-Za-z\s]+)",
+            r"near ([A-Za-z\s]+)",
+            r"([A-Za-z\s]+) area",
+            r"around ([A-Za-z\s]+)"
+        ]
+        
+        import re
+        for pattern in location_patterns:
+            match = re.search(pattern, query)
+            if match:
+                location = match.group(1).strip()
+                if len(location) > 3:  # Avoid very short matches
+                    return location
+        
+        # Default to a common location if none found
+        return "Boston"  # Default location
+
+    def _extract_cuisine(self, query):
+        """Extract cuisine type from query text"""
+        cuisines = [
+            "italian", "chinese", "japanese", "mexican", "indian", 
+            "thai", "french", "spanish", "greek", "american",
+            "seafood", "steakhouse", "vegan", "vegetarian", "fusion",
+            "sushi", "pizza", "pasta", "barbecue", "bbq", "asian"
+        ]
+        
+        query_lower = query.lower()
+        for cuisine in cuisines:
+            if cuisine in query_lower:
+                self.logger.info(f"Extracted cuisine: {cuisine}")
+                return cuisine
+                
+        # Look for phrases like "X food" or "X cuisine"
+        import re
+        patterns = [
+            r"([a-z]+) food",
+            r"([a-z]+) cuisine",
+            r"([a-z]+) restaurant"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                potential_cuisine = match.group(1)
+                self.logger.info(f"Extracted potential cuisine from pattern: {potential_cuisine}")
+                return potential_cuisine
+                
+        self.logger.info("No specific cuisine found in query")
+        return None  # No cuisine specified
+        
+    def _extract_price_range(self, query):
+        """Extract price range from query text"""
+        query_lower = query.lower()
+        
+        # Check for dollar sign indicators
+        if "$$$" in query_lower or "expensive" in query_lower or "high-end" in query_lower:
+            self.logger.info("Extracted price range: $$$")
+            return "$$$"
+        elif "$$" in query_lower or "moderate" in query_lower or "mid-range" in query_lower:
+            self.logger.info("Extracted price range: $$")
+            return "$$"
+        elif "$" in query_lower or "cheap" in query_lower or "budget" in query_lower or "inexpensive" in query_lower:
+            self.logger.info("Extracted price range: $")
+            return "$"
+            
+        # Check for other price indicators
+        if "luxury" in query_lower or "upscale" in query_lower or "fancy" in query_lower:
+            self.logger.info("Extracted price range from keywords: $$$")
+            return "$$$"
+            
+        self.logger.info("No specific price range found in query")
+        return None  # No price range specified
+
+    async def _process_ai_query(self, query, user_id, context):
+        """Process a query that doesn't require web browsing"""
+        self.logger.info(f"Processing AI query: {query} for user {user_id}")
+        
+        try:
+            # Store query for context
+            MessageUtils.add_message(user_id, "user", query)
+            
+            # Get previous conversation history
+            history = MessageUtils.get_messages(user_id)
+            self.logger.info(f"Retrieved conversation history with {len(history) if history else 0} messages")
+            
+            # Generate AI response
+            self.logger.info("Calling AI service for response")
+            response = await self.ai_service.generate_response(query, history)
+            self.logger.info(f"Generated AI response, length: {len(response) if response else 0}")
+            
+            # Store AI response for context
+            MessageUtils.add_message(user_id, "assistant", response)
+            
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"Error in AI query processing: {e}", exc_info=True)
+            error_message = "I'm sorry, I encountered an error while generating a response. Please try again."
+            
+            # Store error response for context
+            MessageUtils.add_message(user_id, "assistant", error_message)
+            
+            return error_message
 
     async def handle_user_message(self, update: Update, context: CallbackContext) -> Optional[int]:
         """

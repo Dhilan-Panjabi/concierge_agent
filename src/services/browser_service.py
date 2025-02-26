@@ -587,11 +587,47 @@ class BrowserService:
     def __init__(self, settings):
         """Initialize the browser service"""
         self.settings = settings
-        self.claude_llm = self._initialize_claude_llm()
-        self._browser_config = self._initialize_browser_config()
-        logger.info("BrowserService initialized")
-        # Don't call asyncio.create_task here - it requires a running event loop
-        # The browser will be initialized when needed in execute_search
+        self.browser_config = settings.get_browser_config()
+        self.timeout_config = settings.get_timeout_config()
+        
+        # Set up logging specifically for browser operations
+        self.logger = logging.getLogger(__name__)
+        # Set level to INFO to ensure all browser operations are logged
+        self.logger.setLevel(logging.INFO)
+        
+        # Force browser-use logger to INFO level as well
+        browser_use_logger = logging.getLogger('browser_use')
+        browser_use_logger.setLevel(logging.INFO)
+        
+        # Force related loggers to INFO as well
+        for logger_name in ['browser_use.agent', 'browser_use.browser', 'browser_use.context']:
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.INFO)
+        
+        # Log browser configuration
+        self.logger.info(f"Browser config initialized: {self.browser_config}")
+        self.logger.info("BrowserService initialized")
+        
+        # Initialize Claude LLM for browser use
+        try:
+            # Import and configure Claude for browser use
+            from browser_use import FunctionAgent, AgentConfig, BrowserConfig
+            from langchain_anthropic import ChatAnthropic
+            
+            # Initialize Claude LLM
+            self.claude_llm = ChatAnthropic(model=settings.CLAUDE_MODEL)
+            self.logger.info(f"Claude LLM initialized with model: {settings.CLAUDE_MODEL}")
+            
+            # Configure browser
+            self.browser_config_obj = BrowserConfig(
+                headless=self.browser_config['headless'],
+                disable_security=True
+            )
+            
+            self.logger.info(f"Browser config initialized: {self.browser_config_obj}")
+        except Exception as e:
+            self.logger.error(f"Error initializing Claude LLM or browser config: {e}", exc_info=True)
+            raise
 
     async def reset_circuit_breaker(self):
         """Reset the circuit breaker state."""
@@ -1073,3 +1109,108 @@ class BrowserService:
                 pass
                 
             return f"I encountered an error while processing the search results: {str(e)}. Please try again with a more specific query."
+
+    async def search_hotels(self, query, location=None, check_in=None, check_out=None):
+        """
+        Search for hotels based on query and optional parameters.
+        
+        Args:
+            query: Search query
+            location: Hotel location
+            check_in: Check-in date
+            check_out: Check-out date
+            
+        Returns:
+            list: Search results
+        """
+        self.logger.info(f"Searching hotels with query: {query}, location: {location}, check_in: {check_in}, check_out: {check_out}")
+        
+        try:
+            from browser_use import FunctionAgent, AgentConfig
+            
+            # Construct search URL
+            search_term = f"{query} hotel {location}" if location else f"{query} hotel"
+            
+            # Define the task
+            task = f"Search for '{search_term}' and find hotel information"
+            if check_in and check_out:
+                task += f" for dates {check_in} to {check_out}"
+            
+            self.logger.info(f"Creating browser agent for task: {task}")
+            
+            # Create agent
+            agent = FunctionAgent.create_browser(
+                llm=self.claude_llm,
+                browser_config=self.browser_config_obj,
+                agent_config=AgentConfig(
+                    name="HotelSearchAgent",
+                    description="Agent for searching hotel information",
+                )
+            )
+            
+            self.logger.info("Browser agent created successfully. Starting search...")
+            
+            # Run search
+            result = await agent.run(task)
+            
+            self.logger.info(f"Search completed. Result type: {type(result)}")
+            self.logger.info(f"Search result summary: {result[:200] if isinstance(result, str) else 'Non-string result'}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error in hotel search: {e}", exc_info=True)
+            return f"Error searching for hotels: {str(e)}"
+
+    async def search_restaurants(self, location, cuisine=None, price_range=None):
+        """
+        Search for restaurants based on location and optional parameters.
+        
+        Args:
+            location: Restaurant location
+            cuisine: Type of cuisine
+            price_range: Price range (e.g., '$', '$$', '$$$')
+            
+        Returns:
+            list: Search results
+        """
+        self.logger.info(f"Searching restaurants with location: {location}, cuisine: {cuisine}, price_range: {price_range}")
+        
+        try:
+            from browser_use import FunctionAgent, AgentConfig
+            
+            # Construct search query
+            search_term = f"best restaurants in {location}"
+            if cuisine:
+                search_term += f" {cuisine} cuisine"
+            if price_range:
+                search_term += f" {price_range} price range"
+            
+            # Define the task
+            task = f"Search for '{search_term}' and find restaurant recommendations with websites, ratings, and price ranges"
+            
+            self.logger.info(f"Creating browser agent for restaurant task: {task}")
+            
+            # Create agent
+            agent = FunctionAgent.create_browser(
+                llm=self.claude_llm,
+                browser_config=self.browser_config_obj,
+                agent_config=AgentConfig(
+                    name="RestaurantSearchAgent",
+                    description="Agent for searching restaurant information",
+                )
+            )
+            
+            self.logger.info("Restaurant browser agent created successfully. Starting search...")
+            
+            # Run search
+            result = await agent.run(task)
+            
+            self.logger.info(f"Restaurant search completed. Result type: {type(result)}")
+            self.logger.info(f"Restaurant search result summary: {result[:200] if isinstance(result, str) else 'Non-string result'}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error in restaurant search: {e}", exc_info=True)
+            return f"Error searching for restaurants: {str(e)}"

@@ -55,7 +55,9 @@ RUN echo "USE_WEBHOOK=true" > .env && \
     echo "MESSAGE_CHUNK_SIZE=4000" >> .env && \
     echo "MAX_HISTORY_LENGTH=10" >> .env && \
     echo "RAILWAY_ENVIRONMENT=production" >> .env && \
-    echo "DISABLE_GIF_CREATION=true" >> .env
+    echo "DISABLE_GIF_CREATION=true" >> .env && \
+    echo "BROWSER_USE_LOG_LEVEL=INFO" >> .env && \
+    echo "BROWSER_USE_TELEMETRY=true" >> .env
 
 # Copy the rest of the application
 COPY . .
@@ -69,6 +71,10 @@ ENV RAILWAY_ENVIRONMENT=production
 ENV USE_WEBHOOK=true
 ENV PORT=8080
 ENV WEBHOOK_URL=https://railway-service.up.railway.app
+ENV BROWSER_USE_LOG_LEVEL=INFO
+ENV BROWSER_USE_TELEMETRY=true
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers
 
 # Explicitly expose ports
 # Port 8080 for health checks and the main app

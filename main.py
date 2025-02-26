@@ -45,6 +45,7 @@ def start_health_check_server():
         class SimpleHealthCheckHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 logger.info(f"Health check request received: {self.path}")
+                # Always respond with 200 OK regardless of the path
                 self.send_response(200)
                 self.send_header("Content-type", "text/plain")
                 self.end_headers()
@@ -95,18 +96,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests"""
         logger.info(f"Health check request received: {self.path}")
-        if self.path == "/telegram/webhook":
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-            logger.info("Health check responded with 200 OK")
-        else:
-            self.send_response(404)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-            logger.info(f"Responded with 404 for path: {self.path}")
+        # Always respond with 200 OK regardless of the path
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+        logger.info("Health check responded with 200 OK")
     
     def log_message(self, format, *args):
         """Override to reduce log noise"""

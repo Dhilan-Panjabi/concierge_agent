@@ -54,21 +54,31 @@ def start_health_check_server():
             health_check_server_running = True
             return
         
-        # Also try connecting using 0.0.0.0
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Check if we can connect to port 8080 on 0.0.0.0
         try:
-            # This might fail with permission error, but that's expected
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             result = sock.connect_ex(('0.0.0.0', 8080))
-            if result == 0 or result == 13:  # Success or permission error (which likely means the port is in use)
-                logger.info("Port 8080 is in use by a process bound to 0.0.0.0, assuming health check server is already running")
-                health_check_server_running = True
-                sock.close()
-                return
-        except:
-            # If we can't connect to 0.0.0.0, that's fine, continue
-            pass
-        finally:
             sock.close()
+            
+            if result == 0:
+                logger.info("Port 8080 is already in use on 0.0.0.0, assuming health check server is running")
+                health_check_server_running = True
+                return
+        except Exception as e:
+            logger.info(f"Error checking 0.0.0.0:8080: {e}")
+        
+        # If we reach here, try to start our own health check server
+        # But first, do a more direct check to avoid the "Address already in use" error
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test_socket.bind(('0.0.0.0', 8080))
+            test_socket.close()
+        except socket.error as e:
+            logger.info(f"Cannot bind to port 8080: {e}")
+            logger.info("Port is already in use, marking health check server as running")
+            health_check_server_running = True
+            return
             
         # Otherwise, continue to start our own health check server
         class SimpleHealthCheckHandler(BaseHTTPRequestHandler):
@@ -85,62 +95,42 @@ def start_health_check_server():
                 logger.info("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
         
         # Start the server on port 8080
-        health_check_server = HTTPServer(('0.0.0.0', 8080), SimpleHealthCheckHandler)
-        logger.info("Health check server created successfully on port 8080")
-        health_check_server_running = True
-        logger.info("Starting health check server...")
-        health_check_server.serve_forever()
+        try:
+            health_check_server = HTTPServer(('0.0.0.0', 8080), SimpleHealthCheckHandler)
+            logger.info("Health check server created successfully on port 8080")
+            health_check_server_running = True
+            logger.info("Starting health check server...")
+            health_check_server.serve_forever()
+        except OSError as e:
+            if "Address already in use" in str(e):
+                logger.info("Port 8080 is already in use, marking health check server as running")
+                health_check_server_running = True
+            else:
+                raise
     except Exception as e:
         logger.error(f"Error starting health check server: {e}", exc_info=True)
+        # Even if we fail, mark as running to prevent endless retries
+        health_check_server_running = True
 
 # Start the health check server in a separate thread immediately
 health_check_thread = threading.Thread(target=start_health_check_server, daemon=True)
 health_check_thread.start()
 logger.info("Health check server thread started")
 
-# Wait for the health check server to start
-for _ in range(20):  # Try for up to 10 seconds
-    if health_check_server_running:
-        logger.info("Health check server is running")
-        break
+# Set a maximum retry count instead of an endless loop
+max_retries = 10
+retry_count = 0
+
+# Wait for the health check server to start or for max retries
+while not health_check_server_running and retry_count < max_retries:
     logger.info("Waiting for health check server to start...")
     time.sleep(0.5)
+    retry_count += 1
 
-# Skip the port test if we've already confirmed the health check server is running
-if health_check_server_running:
-    logger.info("Skipping port test as health check server is already confirmed running")
-else:
-    # Test if the port is actually open and listening
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            result = s.connect_ex(('127.0.0.1', 8080))
-            if result == 0:
-                logger.info("Health check server port is open and listening")
-                health_check_server_running = True
-            else:
-                # Try connecting to 0.0.0.0 as well
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-                    s2.settimeout(1)
-                    try:
-                        result2 = s2.connect_ex(('0.0.0.0', 8080))
-                        if result2 == 0 or result2 == 13:  # Success or permission error
-                            logger.info("Health check server port is open on 0.0.0.0")
-                            health_check_server_running = True
-                        else:
-                            logger.warning(f"Health check server port test on 0.0.0.0 returned code: {result2}")
-                    except Exception as e:
-                        logger.warning(f"Error testing health check server on 0.0.0.0: {e}")
-                        
-                # Even if both tests fail, consider the health check running if started by start.py
-                if not health_check_server_running:
-                    logger.warning("Health check server port tests failed, but continuing anyway as it might be handled by start.py")
-                    health_check_server_running = True
-    except Exception as e:
-        logger.warning(f"Error testing health check server port: {e}")
-        # Continue anyway, as the health check server might be running in start.py
-        logger.info("Continuing despite port test error as health check might be handled by start.py")
-        health_check_server_running = True
+# If we hit max retries, assume the server is running anyway
+if retry_count >= max_retries and not health_check_server_running:
+    logger.warning("Reached maximum retries waiting for health check server. Continuing anyway.")
+    health_check_server_running = True
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -254,6 +244,22 @@ class BookingBot:
 
     def start_health_check_server(self, port=8080):
         """Start a simple HTTP server for health checks"""
+        # Check if the global health check server is already running
+        global health_check_server_running
+        if health_check_server_running:
+            logger.info("Health check server is already running, not starting a new one")
+            return None
+            
+        # Try to check if the port is already in use
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test_socket.bind(('0.0.0.0', port))
+            test_socket.close()
+        except socket.error:
+            logger.info(f"Port {port} is already in use, not starting a new health check server")
+            return None
+        
         try:
             server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
             logger.info(f"Starting health check server on port {port}")

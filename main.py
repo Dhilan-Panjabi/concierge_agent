@@ -37,10 +37,11 @@ apply_patches()
 
 # Global flag to indicate if the health check server is running
 health_check_server_running = False
+health_check_server = None
 
 # Start a simple HTTP server for health checks immediately
 def start_health_check_server():
-    global health_check_server_running
+    global health_check_server_running, health_check_server
     try:
         class SimpleHealthCheckHandler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -56,11 +57,11 @@ def start_health_check_server():
                 logger.info("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
         
         # Start the server on port 8080
-        server = HTTPServer(('0.0.0.0', 8080), SimpleHealthCheckHandler)
+        health_check_server = HTTPServer(('0.0.0.0', 8080), SimpleHealthCheckHandler)
         logger.info("Health check server created successfully on port 8080")
         health_check_server_running = True
         logger.info("Starting health check server...")
-        server.serve_forever()
+        health_check_server.serve_forever()
     except Exception as e:
         logger.error(f"Error starting health check server: {e}", exc_info=True)
 
@@ -70,7 +71,7 @@ health_check_thread.start()
 logger.info("Health check server thread started")
 
 # Wait for the health check server to start
-for _ in range(10):  # Try for up to 5 seconds
+for _ in range(20):  # Try for up to 10 seconds
     if health_check_server_running:
         logger.info("Health check server is running")
         break
@@ -79,15 +80,15 @@ for _ in range(10):  # Try for up to 5 seconds
 
 # Test if the port is actually open and listening
 try:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    result = sock.connect_ex(('127.0.0.1', 8080))
-    if result == 0:
-        logger.info("Port 8080 is open and listening")
-    else:
-        logger.error(f"Port 8080 is not open! Error code: {result}")
-    sock.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        result = s.connect_ex(('127.0.0.1', 8080))
+        if result == 0:
+            logger.info("Health check server port is open and listening")
+        else:
+            logger.error(f"Health check server port is not open. Error code: {result}")
 except Exception as e:
-    logger.error(f"Error testing port: {e}")
+    logger.error(f"Error testing health check server port: {e}", exc_info=True)
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):

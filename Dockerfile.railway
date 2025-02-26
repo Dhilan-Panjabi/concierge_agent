@@ -44,7 +44,6 @@ RUN playwright install-deps chromium
 RUN echo "USE_WEBHOOK=true" > .env && \
     echo "WEBHOOK_PATH=/telegram/webhook" >> .env && \
     echo "PORT=8443" >> .env && \
-    echo "WEBHOOK_URL=https://${RAILWAY_PUBLIC_DOMAIN}" >> .env && \
     echo "BROWSER_HEADLESS=true" >> .env && \
     echo "BROWSER_BROWSERLESS=true" >> .env && \
     echo "GPT_MODEL=gpt-4o" >> .env && \
@@ -68,53 +67,15 @@ ENV DISABLE_GIF_CREATION=true
 ENV RAILWAY_ENVIRONMENT=production
 ENV USE_WEBHOOK=true
 ENV PORT=8080
-ENV WEBHOOK_URL=https://${RAILWAY_PUBLIC_DOMAIN}
 
 # Explicitly expose ports
-# Port 8080 for health checks and main application
+# Port 8080 for health checks and the main app
 EXPOSE 8080
 # Port 8443 for Telegram webhook
 EXPOSE 8443
 
-# Create a simple health check script
-RUN echo '#!/usr/bin/env python3' > /app/start.py && \
-    echo 'import http.server, socketserver, threading, subprocess, time, sys, os' >> /app/start.py && \
-    echo 'print("Starting health check server...")' >> /app/start.py && \
-    echo 'class Handler(http.server.SimpleHTTPRequestHandler):' >> /app/start.py && \
-    echo '    def do_GET(self):' >> /app/start.py && \
-    echo '        print(f"Health check request received: {self.path}")' >> /app/start.py && \
-    echo '        self.send_response(200)' >> /app/start.py && \
-    echo '        self.send_header("Content-type", "text/plain")' >> /app/start.py && \
-    echo '        self.end_headers()' >> /app/start.py && \
-    echo '        self.wfile.write(b"OK")' >> /app/start.py && \
-    echo '    def log_message(self, format, *args): pass' >> /app/start.py && \
-    echo 'def run_server():' >> /app/start.py && \
-    echo '    with socketserver.TCPServer(("", 8080), Handler) as httpd:' >> /app/start.py && \
-    echo '        print("Health check server running on port 8080")' >> /app/start.py && \
-    echo '        httpd.serve_forever()' >> /app/start.py && \
-    echo 'server_thread = threading.Thread(target=run_server, daemon=True)' >> /app/start.py && \
-    echo 'server_thread.start()' >> /app/start.py && \
-    echo 'time.sleep(2)  # Give the server time to start' >> /app/start.py && \
-    echo 'print("Starting main application...")' >> /app/start.py && \
-    echo '# Ensure WEBHOOK_URL is set' >> /app/start.py && \
-    echo 'if "RAILWAY_PUBLIC_DOMAIN" in os.environ and not os.environ.get("WEBHOOK_URL"):' >> /app/start.py && \
-    echo '    os.environ["WEBHOOK_URL"] = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]' >> /app/start.py && \
-    echo '    print("Set WEBHOOK_URL to " + os.environ["WEBHOOK_URL"])' >> /app/start.py && \
-    echo 'os.execvp("python", ["python", "main.py"])' >> /app/start.py && \
-    chmod +x /app/start.py
+# Make sure the start.py script is executable
+RUN chmod +x /app/start.py
 
-# Create a script to update the .env file at runtime
-RUN echo '#!/bin/bash' > /app/update_env.sh && \
-    echo 'if [ -n "$RAILWAY_PUBLIC_DOMAIN" ]; then' >> /app/update_env.sh && \
-    echo '  echo "WEBHOOK_URL=https://$RAILWAY_PUBLIC_DOMAIN" >> /app/.env' >> /app/update_env.sh && \
-    echo '  echo "Updated .env with WEBHOOK_URL=https://$RAILWAY_PUBLIC_DOMAIN"' >> /app/update_env.sh && \
-    echo 'else' >> /app/update_env.sh && \
-    echo '  echo "WARNING: RAILWAY_PUBLIC_DOMAIN is not set"' >> /app/update_env.sh && \
-    echo 'fi' >> /app/update_env.sh && \
-    chmod +x /app/update_env.sh
-
-# Update the start.py script to run the update_env.sh script
-RUN sed -i 's|print("Starting main application...")|print("Starting main application...")\\\nos.system("/app/update_env.sh")|' /app/start.py
-
-# Run the startup script instead of directly running main.py
+# Run the startup script
 CMD ["python", "/app/start.py"] 

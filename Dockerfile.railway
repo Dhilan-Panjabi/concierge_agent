@@ -37,23 +37,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install only the Chromium browser for Playwright (no other browsers)
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers
-RUN playwright install --with-deps chromium
+RUN playwright install chromium
+RUN playwright install-deps chromium
 
-# Create the environment file directly in the Dockerfile
-RUN echo "USE_WEBHOOK=true" > .env && \
-    echo "WEBHOOK_PATH=/telegram/webhook" >> .env && \
-    echo "PORT=8443" >> .env && \
-    echo "BROWSER_HEADLESS=true" >> .env && \
-    echo "BROWSER_BROWSERLESS=true" >> .env && \
-    echo "GPT_MODEL=gpt-4o" >> .env && \
-    echo "DEEPSEEK_MODEL=deepseek-reasoner" >> .env && \
-    echo "CLAUDE_MODEL=anthropic/claude-3-7-sonnet-20250219" >> .env && \
-    echo "SEARCH_TIMEOUT=90" >> .env && \
-    echo "MAX_RETRIES=3" >> .env && \
-    echo "MESSAGE_CHUNK_SIZE=4000" >> .env && \
-    echo "MAX_HISTORY_LENGTH=10" >> .env && \
-    echo "RAILWAY_ENVIRONMENT=production" >> .env && \
-    echo "DISABLE_GIF_CREATION=true" >> .env
+# Copy the Railway-specific environment file
+COPY .env.railway .env
 
 # Copy the rest of the application
 COPY . .
@@ -66,8 +54,10 @@ ENV DISABLE_GIF_CREATION=true
 ENV RAILWAY_ENVIRONMENT=production
 ENV USE_WEBHOOK=true
 
-# Expose ports
+# Explicitly expose ports
+# Port 8080 for health checks
 EXPOSE 8080
+# Port 8443 for Telegram webhook
 EXPOSE 8443
 
 # Run the bot

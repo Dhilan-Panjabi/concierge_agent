@@ -625,15 +625,15 @@ class BrowserService:
             
             # Add browserless configuration if enabled
             if self.browser_config.get('browserless', False):
-                # Set browserless URL
-                self.browser_config_obj.wss_url = self.browser_config.get('browserless_url')
+                # Set CDP URL for browser-use library
+                self.browser_config_obj.cdp_url = self.browser_config.get('browserless_url')
                 
-                # Set browserless token if available
-                if self.browser_config.get('browserless_token'):
-                    self.browser_config_obj.token = self.browser_config.get('browserless_token')
-                    self.logger.info("Browserless token configured")
+                # Set Steel API key for authentication
+                if self.settings.STEEL_API_KEY:
+                    self.browser_config_obj.token = self.settings.STEEL_API_KEY
+                    self.logger.info("Steel API key configured for browser automation")
                 
-                self.logger.info(f"Browserless configuration added: URL={self.browser_config_obj.wss_url}")
+                self.logger.info(f"Browserless configuration added: CDP URL={self.browser_config_obj.cdp_url}")
             
             # Initialize class-level browser config
             BrowserService._browser_config = self.browser_config_obj

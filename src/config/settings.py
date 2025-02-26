@@ -51,7 +51,7 @@ class Settings:
             'BROWSER_BROWSERLESS', True)
         self.BROWSERLESS_URL: str = self._get_env(
             'BROWSERLESS_URL',
-            'wss://chrome.browserless.io'
+            'wss://api.steel.dev/websocket'
         )
         self.BROWSERLESS_TOKEN: Optional[str] = os.getenv('BROWSERLESS_TOKEN', '')
 

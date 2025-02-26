@@ -74,5 +74,28 @@ EXPOSE 8080
 # Port 8443 for Telegram webhook
 EXPOSE 8443
 
-# Run the bot
-CMD ["python", "main.py"] 
+# Create a simple health check script
+RUN echo '#!/usr/bin/env python3' > /app/start.py && \
+    echo 'import http.server, socketserver, threading, subprocess, time, sys, os' >> /app/start.py && \
+    echo 'print("Starting health check server...")' >> /app/start.py && \
+    echo 'class Handler(http.server.SimpleHTTPRequestHandler):' >> /app/start.py && \
+    echo '    def do_GET(self):' >> /app/start.py && \
+    echo '        print(f"Health check request received: {self.path}")' >> /app/start.py && \
+    echo '        self.send_response(200)' >> /app/start.py && \
+    echo '        self.send_header("Content-type", "text/plain")' >> /app/start.py && \
+    echo '        self.end_headers()' >> /app/start.py && \
+    echo '        self.wfile.write(b"OK")' >> /app/start.py && \
+    echo '    def log_message(self, format, *args): pass' >> /app/start.py && \
+    echo 'def run_server():' >> /app/start.py && \
+    echo '    with socketserver.TCPServer(("", 8080), Handler) as httpd:' >> /app/start.py && \
+    echo '        print("Health check server running on port 8080")' >> /app/start.py && \
+    echo '        httpd.serve_forever()' >> /app/start.py && \
+    echo 'server_thread = threading.Thread(target=run_server, daemon=True)' >> /app/start.py && \
+    echo 'server_thread.start()' >> /app/start.py && \
+    echo 'time.sleep(2)  # Give the server time to start' >> /app/start.py && \
+    echo 'print("Starting main application...")' >> /app/start.py && \
+    echo 'os.execvp("python", ["python", "main.py"])' >> /app/start.py && \
+    chmod +x /app/start.py
+
+# Run the startup script instead of directly running main.py
+CMD ["python", "/app/start.py"] 

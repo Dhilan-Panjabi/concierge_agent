@@ -161,39 +161,40 @@ class BrowserService:
                 # Store the session ID for later reference
                 self._current_contexts[user_id] = {'session_id': session_id}
                 
-                # Create the Steel.dev CDP URL - simple string format
-                cdp_url = f"wss://connect.steel.dev?apiKey={self.settings.STEEL_API_KEY}&sessionId={session_id}"
+                # Get the exact browserless URL from config (this is the Steel.dev WebSocket URL)
+                browserless_url = self.browser_config.get('browserless_url')
+                
+                # Make sure we have a valid URL
+                if not browserless_url:
+                    logger.warning("No browserless_url found in config, using default Steel.dev URL")
+                    browserless_url = "wss://api.steel.dev/websocket"
+                
+                # Create Steel.dev CDP URL as per documentation
+                cdp_url = f"{browserless_url}?apiKey={self.settings.STEEL_API_KEY}&sessionId={session_id}"
                 
                 # Log the URL (partially redacted for security)
                 api_key = self.settings.STEEL_API_KEY
                 redacted_key = f"{api_key[:8]}...{api_key[-8:]}" if len(api_key) > 16 else "***"
                 redacted_url = cdp_url.replace(api_key, redacted_key)
-                logger.info(f"Created Steel.dev CDP URL: {redacted_url}")
-                logger.info(f"Configured Steel.dev connection with session ID {session_id} for user {user_id}")
+                logger.info(f"Steel.dev CDP URL: {redacted_url}")
                 
-                # Create a simple browser config - ONLY headless parameter
+                # Create a browser config with ONLY the cdp_url
                 user_browser_config = BrowserConfig(
-                    headless=True 
+                    headless=True
                 )
                 
-                # Set the CDP URL directly
+                # Set the CDP URL directly - this is the key configuration for Steel.dev
                 user_browser_config.cdp_url = cdp_url
                 
-                # Initialize browser with the simple config
+                # Initialize browser with the config
                 try:
                     logger.info(f"Creating browser with Steel.dev CDP URL...")
                     self._browsers[user_id] = Browser(user_browser_config)
                     logger.info(f"Successfully created browser with Steel.dev CDP URL")
                     
-                    # Verify browser connection
-                    if hasattr(self._browsers[user_id], 'page'):
-                        logger.info(f"Browser page object exists: {self._browsers[user_id].page is not None}")
-                    else:
-                        logger.warning("Browser does not have a page property yet")
-                        
                 except Exception as e:
                     logger.error(f"Error creating browser with Steel.dev CDP URL: {e}", exc_info=True)
-                    # If we can't connect, fall back to standard browser
+                    # If we can't connect, try standard browser as fallback
                     logger.info("Falling back to standard browser initialization")
                     self._browsers[user_id] = Browser(self._browser_config)
             else:
@@ -292,6 +293,18 @@ class BrowserService:
         Returns:
             str: Result of the search or task
         """
+        # Debug Steel.dev connection first
+        logger.info(f"Executing search with query: '{query[:50]}...' for user {user_id}")
+        logger.info(f"Current browser config: {self.browser_config}")
+        if self.browser_config.get('browserless', False) and self.settings.STEEL_API_KEY:
+            logger.info(f"Steel.dev settings - Using browserless: {self.browser_config.get('browserless')}")
+            logger.info(f"Steel.dev connection URL: {self.browser_config.get('browserless_url')}")
+            api_key = self.settings.STEEL_API_KEY
+            logger.info(f"Steel.dev API key is configured: {bool(api_key)}")
+            if api_key:
+                redacted_key = f"{api_key[:8]}...{api_key[-8:]}" if len(api_key) > 16 else "***"
+                logger.info(f"Steel.dev API key (redacted): {redacted_key}")
+        
         # Update activity timestamp for this user
         self._last_activity_times[user_id] = time.time()
         
@@ -341,17 +354,41 @@ class BrowserService:
         steel_connection_failures = 0
         max_steel_connection_failures = 2
         
+        # Keep track of total initialization failures
+        total_initialization_failures = 0
+        max_initialization_failures = 3
+        
         while retries <= max_retries:
             try:
+                # Check if we've exceeded the max initialization failures
+                if total_initialization_failures >= max_initialization_failures:
+                    logger.error(f"Maximum browser initialization failures reached ({total_initialization_failures})")
+                    return "I'm sorry, but I'm currently having trouble accessing my search tools. Let me help you with information I already have instead. Could you ask a different question or try again later?"
+                
                 # Initialize browser if needed
                 if user_id not in self._browsers or self._browsers[user_id] is None:
                     logger.info(f"No browser instance for user {user_id}, initializing...")
-                    await self.initialize_browser(user_id)
+                    try:
+                        browser = await self.initialize_browser(user_id)
+                        logger.info(f"Browser initialization result: {browser is not None}")
+                        if not browser:
+                            total_initialization_failures += 1
+                            if total_initialization_failures >= max_initialization_failures:
+                                logger.error(f"Browser initialization consistently returning None")
+                                continue
+                    except Exception as init_error:
+                        logger.error(f"Browser initialization error: {init_error}", exc_info=True)
+                        steel_connection_failures += 1
+                        total_initialization_failures += 1
+                        need_browser_reset = True
+                        await asyncio.sleep(1)
+                        continue
                 
                 # Simple, direct check if browser instance exists
                 if not self._browsers[user_id]:
                     logger.error(f"Failed to initialize browser for user {user_id}")
                     steel_connection_failures += 1
+                    total_initialization_failures += 1
                     
                     if steel_connection_failures >= max_steel_connection_failures:
                         return "I'm sorry, but I'm having trouble connecting to the browser service. Please try again later."
@@ -368,24 +405,38 @@ class BrowserService:
                 # Simple verification that page access works
                 try:
                     # Try to access browser page as a simple connectivity test
-                    page_exists = hasattr(browser_instance, 'page') and browser_instance.page is not None
-                    logger.info(f"Browser page exists: {page_exists}")
+                    logger.info("Testing browser connection...")
                     
-                    if not page_exists:
-                        logger.warning("Browser page is not available")
-                        steel_connection_failures += 1
+                    # Check if the browser has a page property - this is the simplest test
+                    if hasattr(browser_instance, 'page'):
+                        logger.info("Browser has page property")
                         
+                        # Check if page is accessible
+                        if browser_instance.page is not None:
+                            logger.info("Browser page is accessible - connection successful")
+                        else:
+                            logger.warning("Browser page is None - connection failed")
+                            steel_connection_failures += 1
+                            need_browser_reset = True
+                    else:
+                        logger.warning("Browser does not have a page property - connection failed")
+                        steel_connection_failures += 1
+                        need_browser_reset = True
+                    
+                    # If we had connection failures, handle them
+                    if need_browser_reset:
                         if steel_connection_failures >= max_steel_connection_failures:
                             logger.error("Maximum Steel.dev connection failures reached")
                             return "I'm sorry, but I'm having trouble connecting to the browser service. Please try again later."
                         
                         # Force a reset and retry
-                        need_browser_reset = True
                         await self.cleanup(user_id=user_id, force=True)
+                        await asyncio.sleep(1)
                         await self.initialize_browser(user_id)
                         continue
+                        
                 except Exception as e:
-                    logger.warning(f"Error verifying browser page: {e}")
+                    logger.warning(f"Error verifying browser connection: {e}")
                     steel_connection_failures += 1
                     need_browser_reset = True
                     
@@ -697,8 +748,9 @@ class BrowserService:
                     logger.info(f"Force closing browser for user {user_id}")
                     try:
                         await self._browsers[user_id].close()
+                        logger.info(f"Browser successfully force closed for user {user_id}")
                         
-                        # Release Steel.dev session if applicable
+                        # Log Steel.dev session release
                         if (user_id in self._current_contexts and 
                             'session_id' in self._current_contexts[user_id] and
                             self.browser_config.get('browserless', False) and
@@ -706,17 +758,7 @@ class BrowserService:
                             
                             session_id = self._current_contexts[user_id]['session_id']
                             logger.info(f"Force releasing Steel.dev session {session_id} for user {user_id}")
-                            
-                            try:
-                                # Use Steel SDK
-                                from steel import Steel
-                                steel_client = Steel(steel_api_key=self.settings.STEEL_API_KEY)
-                                steel_client.sessions.release(session_id)
-                                logger.info(f"Successfully released Steel.dev session {session_id}")
-                            except ImportError:
-                                logger.warning("Steel SDK not available for releasing session")
-                            except Exception as steel_err:
-                                logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
+                            # Session will be automatically released when connection is closed
                         
                     except Exception as e:
                         logger.warning(f"Error force closing browser for user {user_id}: {e}")
@@ -732,8 +774,9 @@ class BrowserService:
                     if browser is not None:
                         try:
                             await browser.close()
+                            logger.info(f"Browser successfully force closed for user {uid}")
                             
-                            # Release Steel.dev session if applicable
+                            # Log Steel.dev session release
                             if (uid in self._current_contexts and 
                                 'session_id' in self._current_contexts[uid] and
                                 self.browser_config.get('browserless', False) and
@@ -741,17 +784,7 @@ class BrowserService:
                                 
                                 session_id = self._current_contexts[uid]['session_id']
                                 logger.info(f"Force releasing Steel.dev session {session_id} for user {uid}")
-                                
-                                try:
-                                    # Use Steel SDK
-                                    from steel import Steel
-                                    steel_client = Steel(steel_api_key=self.settings.STEEL_API_KEY)
-                                    steel_client.sessions.release(session_id)
-                                    logger.info(f"Successfully released Steel.dev session {session_id}")
-                                except ImportError:
-                                    logger.warning("Steel SDK not available for releasing session")
-                                except Exception as steel_err:
-                                    logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
+                                # Session will be automatically released when connection is closed
                         
                         except Exception as e:
                             logger.warning(f"Error force closing browser for user {uid}: {e}")
@@ -765,6 +798,14 @@ class BrowserService:
         
         except Exception as e:
             logger.error(f"Error in force_close_browser: {e}")
+            # Make sure to reset references even if force close fails
+            if user_id is not None:
+                if user_id in self._browsers:
+                    self._browsers[user_id] = None
+                if user_id in self._last_activity_times:
+                    del self._last_activity_times[user_id]
+                if user_id in self._current_contexts:
+                    del self._current_contexts[user_id]
 
     async def extend_timeout(self, user_id: int = 1, additional_seconds=1800):
         """
@@ -815,12 +856,29 @@ class BrowserService:
         
         # Initialize Claude LLM for browser use
         try:
-            # Initialize Claude LLM
-            from langchain_anthropic import ChatAnthropic
-            
-            # Initialize Claude LLM
-            self.claude_llm = ChatAnthropic(model=settings.CLAUDE_MODEL)
-            self.logger.info(f"Claude LLM initialized with model: {settings.CLAUDE_MODEL}")
+            # Use OpenRouter for Claude access if API key is available
+            if hasattr(settings, 'OPENROUTER_API_KEY') and settings.OPENROUTER_API_KEY:
+                from langchain_openai import ChatOpenAI
+                
+                # Log the model we're trying to use
+                self.logger.info(f"Initializing Claude via OpenRouter with model: {settings.CLAUDE_MODEL}")
+                
+                # Initialize Claude LLM with OpenRouter
+                self.claude_llm = ChatOpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=settings.OPENROUTER_API_KEY,
+                    model=settings.CLAUDE_MODEL,
+                    max_tokens=4096
+                )
+                self.logger.info(f"Successfully initialized Claude LLM via OpenRouter")
+            else:
+                # Fall back to Anthropic direct API
+                from langchain_anthropic import ChatAnthropic
+                
+                self.logger.info(f"Initializing Claude directly via Anthropic API with model: {settings.CLAUDE_MODEL}")
+                # Initialize Claude LLM
+                self.claude_llm = ChatAnthropic(model=settings.CLAUDE_MODEL)
+                self.logger.info(f"Successfully initialized Claude LLM via Anthropic API")
             
             # Configure base browser config with only valid parameters
             self.browser_config_obj = BrowserConfig(

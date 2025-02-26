@@ -35,7 +35,8 @@ class Settings:
         # Railway specific settings
         self.RAILWAY_SERVICE_ID: Optional[str] = os.getenv('RAILWAY_SERVICE_ID')
         self.RAILWAY_REPLICA_ID: Optional[str] = os.getenv('RAILWAY_REPLICA_ID')
-        self.IS_PRIMARY_INSTANCE: bool = not self.RAILWAY_REPLICA_ID or self.RAILWAY_REPLICA_ID == '0'
+        # When running on Railway with numReplicas=1, any instance is the primary instance
+        self.IS_PRIMARY_INSTANCE: bool = True
 
         # API Keys
         self.OPENAI_API_KEY: str = self._get_env('OPENAI_API_KEY')

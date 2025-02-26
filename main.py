@@ -10,6 +10,8 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import socket
 import time
+import psutil
+import datetime
 
 from telegram import Update
 from telegram.ext import Application, CallbackContext, CommandHandler as TelegramCommandHandler
@@ -313,11 +315,73 @@ class BookingBot:
                 logger.info(f"Received echo command from user {update.effective_user.id}")
                 await update.message.reply_text(f"Echo: I received your command! Bot is working.")
             
-            # Register the echo command
+            # Add a debug command for more detailed diagnostics
+            async def debug_command(update: Update, context: CallbackContext) -> None:
+                """Debug command to show detailed information about the bot's state"""
+                logger.info(f"Received debug command from user {update.effective_user.id}")
+                
+                # Get bot info
+                me = await self.application.bot.get_me()
+                webhook_info = await self.application.bot.get_webhook_info()
+                
+                # Check health check server status
+                health_status = "Running" if health_check_server_running else "Not running"
+                
+                # Get memory usage
+                try:
+                    process = psutil.Process(os.getpid())
+                    memory_usage = process.memory_info().rss / 1024 / 1024  # in MB
+                    memory_info = f"{memory_usage:.2f} MB"
+                except Exception as e:
+                    logger.error(f"Error getting memory usage: {e}")
+                    memory_info = "Error getting memory usage"
+                
+                # Get uptime
+                try:
+                    start_time = datetime.datetime.strptime(
+                        os.environ.get('APP_START_TIME', time.strftime('%Y-%m-%d %H:%M:%S')),
+                        '%Y-%m-%d %H:%M:%S'
+                    )
+                    uptime = datetime.datetime.now() - start_time
+                except Exception as e:
+                    logger.error(f"Error calculating uptime: {e}")
+                    uptime = "Unknown"
+                
+                # Check active users
+                active_users = len(MessageUtils._user_data)
+                
+                # Compile debug information
+                debug_info = [
+                    f"🤖 Bot: {me.first_name} (@{me.username})",
+                    f"🆔 Bot ID: {me.id}",
+                    f"📊 Webhook URL: {webhook_info.url or 'None'}",
+                    f"📡 Pending updates: {webhook_info.pending_update_count}",
+                    f"🏥 Health check server: {health_status}",
+                    f"🔄 Mode: {'Webhook' if webhook_info.url else 'Polling'}",
+                    f"⚙️ Railway instance ID: {os.environ.get('RAILWAY_REPLICA_ID', 'Not on Railway')}",
+                    f"🌐 Environment: {'Railway' if os.environ.get('RAILWAY_SERVICE_ID') else 'Local'}",
+                    f"⏱️ Time: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"⏳ Uptime: {uptime}",
+                    f"💾 Memory usage: {memory_info}",
+                    f"👥 Active users: {active_users}",
+                    f"🔍 Python version: {sys.version.split()[0]}"
+                ]
+                
+                try:
+                    await update.message.reply_text("\n".join(debug_info))
+                except Exception as e:
+                    logger.error(f"Error sending debug info: {e}")
+                    # Try sending a shorter version
+                    await update.message.reply_text(f"Bot is running as {me.username}. Error showing full debug: {str(e)}")
+            
+            # Register the commands
             self.application.add_handler(
                 TelegramCommandHandler("echo", echo_command)
             )
-            logger.info("Added diagnostic echo command handler")
+            self.application.add_handler(
+                TelegramCommandHandler("debug", debug_command)
+            )
+            logger.info("Added diagnostic command handlers")
             
             self.application.add_error_handler(self.error_handler)
 
@@ -353,8 +417,10 @@ class BookingBot:
                     
                     logger.info(f"Railway instance info - Replica ID: {railway_instance_id}, Service ID: {railway_service_id}")
                     
-                    # Only the first instance (or if RAILWAY_REPLICA_ID is not set) should poll for updates
-                    is_primary_instance = not railway_instance_id or railway_instance_id == '0'
+                    # When running on Railway, treat any instance as the primary
+                    # This is because Railway uses UUIDs for replica IDs, not sequential numbers
+                    # Since our railway.json is configured for only 1 replica, any running instance is primary
+                    is_primary_instance = True  # When running on Railway with 1 replica, always poll for updates
                     logger.info(f"Is primary instance that should poll for updates: {is_primary_instance}")
                     
                     # Configure signals for graceful shutdown
@@ -392,21 +458,82 @@ class BookingBot:
                     
                     # Only poll for updates on the primary instance
                     if is_primary_instance:
-                        # Use the built-in polling mechanism which is more reliable
-                        logger.info("Starting to poll for updates on primary instance using built-in method...")
-                        
-                        # Configure the updater with proper settings
-                        await self.application.bot.delete_webhook()
-                        await self.application.updater.start_polling(
-                            drop_pending_updates=True,
-                            allowed_updates=["message", "callback_query", "inline_query"],
-                            close_loop=False  # We'll manage the loop ourselves
-                        )
-                        
-                        # Keep the main loop running
-                        logger.info("Polling started successfully. Bot is now listening for messages.")
-                        while True:
-                            await asyncio.sleep(60)  # Just keep the loop alive
+                        try:
+                            # Use the built-in polling mechanism which is more reliable
+                            logger.info("Starting to poll for updates on primary instance using built-in method...")
+                            
+                            # Double-check there are no webhooks
+                            webhook_info = await self.application.bot.get_webhook_info()
+                            logger.info(f"Current webhook status - URL: {webhook_info.url}, Pending updates: {webhook_info.pending_update_count}")
+                            
+                            if webhook_info.url:
+                                logger.info("Deleting existing webhook before polling")
+                                await self.application.bot.delete_webhook()
+                                webhook_info = await self.application.bot.get_webhook_info()
+                                logger.info(f"Webhook status after deletion - URL: {webhook_info.url}")
+                            
+                            # Configure the updater with proper settings
+                            logger.info("Starting polling with application.updater.start_polling()")
+                            try:
+                                await self.application.updater.start_polling(
+                                    drop_pending_updates=True,
+                                    allowed_updates=["message", "callback_query", "inline_query"],
+                                    close_loop=False  # We'll manage the loop ourselves
+                                )
+                                logger.info("Polling started successfully. Bot is now listening for messages.")
+                                
+                                # Log telemetry info to confirm connection
+                                me = await self.application.bot.get_me()
+                                logger.info(f"Connected to Telegram as {me.first_name} (@{me.username})")
+                                logger.info("Waiting for messages from users...")
+                            except Exception as polling_error:
+                                logger.error(f"Error starting polling: {polling_error}", exc_info=True)
+                                # Try fallback method
+                                logger.info("Trying manual polling as fallback")
+                                # Keep the loop running
+                                offset = 0
+                                while True:
+                                    try:
+                                        updates = await self.application.bot.get_updates(offset=offset, timeout=30)
+                                        logger.info(f"Received {len(updates)} updates")
+                                        for update in updates:
+                                            offset = update.update_id + 1
+                                            await self.application.process_update(update)
+                                        await asyncio.sleep(1)
+                                    except Exception as e:
+                                        logger.error(f"Error in fallback polling: {e}", exc_info=True)
+                                        await asyncio.sleep(5)
+                            
+                            # Keep the main loop running
+                            logger.info("Polling started successfully. Bot is now listening for messages.")
+                            logger.info("Waiting for messages from users...")
+                            while True:
+                                try:
+                                    await asyncio.sleep(60)  # Just keep the loop alive
+                                    # Check bot status every minute
+                                    try:
+                                        me = await self.application.bot.get_me()
+                                        logger.debug(f"Bot is still connected as {me.username}")
+                                    except Exception as check_error:
+                                        logger.error(f"Error checking bot status: {check_error}")
+                                        # Try to reconnect
+                                        logger.info("Attempting to reconnect...")
+                                        try:
+                                            await self.application.updater.start_polling(
+                                                drop_pending_updates=False,  # Keep existing updates
+                                                allowed_updates=["message", "callback_query", "inline_query"],
+                                                close_loop=False
+                                            )
+                                            logger.info("Reconnected successfully")
+                                        except Exception as reconnect_error:
+                                            logger.error(f"Failed to reconnect: {reconnect_error}")
+                                except Exception as loop_error:
+                                    logger.error(f"Error in main loop: {loop_error}")
+                                    # Don't exit the loop no matter what
+                                    await asyncio.sleep(10)  # Wait before next iteration
+                        except Exception as e:
+                            logger.error(f"Critical error in polling setup: {e}", exc_info=True)
+                            raise
                     else:
                         # Non-primary instances should just stay alive for health checks but not poll
                         logger.info("This is not the primary instance. Health check server active, but not polling for updates.")
@@ -418,20 +545,34 @@ class BookingBot:
                     await self.application.initialize()
                     await self.application.start()
                     
-                    # Make sure any webhook is deleted
-                    await self.application.bot.delete_webhook()
-                    
-                    # Use the built-in polling method which is more reliable
-                    logger.info("Starting polling with built-in method...")
-                    await self.application.updater.start_polling(
-                        drop_pending_updates=True,
-                        allowed_updates=["message", "callback_query", "inline_query"]
-                    )
-                    
-                    # Keep the app running
-                    logger.info("Polling started successfully. Bot is now listening for messages.")
-                    while True:
-                        await asyncio.sleep(3600)  # Sleep for an hour
+                    try:
+                        # Make sure any webhook is deleted
+                        webhook_info = await self.application.bot.get_webhook_info()
+                        logger.info(f"Current webhook status - URL: {webhook_info.url}, Pending updates: {webhook_info.pending_update_count}")
+                        
+                        if webhook_info.url:
+                            logger.info("Deleting existing webhook before polling")
+                            await self.application.bot.delete_webhook()
+                        
+                        # Use the built-in polling method which is more reliable
+                        logger.info("Starting polling with built-in method...")
+                        await self.application.updater.start_polling(
+                            drop_pending_updates=True,
+                            allowed_updates=["message", "callback_query", "inline_query"]
+                        )
+                        
+                        # Log telemetry info to confirm connection
+                        me = await self.application.bot.get_me()
+                        logger.info(f"Connected to Telegram as {me.first_name} (@{me.username})")
+                        
+                        # Keep the app running
+                        logger.info("Polling started successfully. Bot is now listening for messages.")
+                        logger.info("Waiting for messages from users...")
+                        while True:
+                            await asyncio.sleep(3600)  # Sleep for an hour
+                    except Exception as e:
+                        logger.error(f"Error in polling mode: {e}", exc_info=True)
+                        raise
             
             # Run the async function
             asyncio.run(start())
@@ -459,6 +600,11 @@ def main():
     logger.info("Starting application...")
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Current directory: {os.getcwd()}")
+    
+    # Set and log the application start time
+    start_time = time.strftime('%Y-%m-%d %H:%M:%S')
+    os.environ['APP_START_TIME'] = start_time
+    logger.info(f"Application start time: {start_time}")
 
     try:
         # Start the bot

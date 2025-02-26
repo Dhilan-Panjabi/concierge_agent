@@ -130,6 +130,38 @@ class BrowserService:
         except Exception as e:
             logger.error(f"Error in inactivity check: {e}", exc_info=True)
 
+    def _create_steel_cdp_url(self, session_id=None):
+        """
+        Create a properly formatted CDP URL for Steel.dev.
+        
+        Args:
+            session_id: Optional session ID
+            
+        Returns:
+            str: Formatted CDP URL
+        """
+        try:
+            # Start with the base URL exactly as in Steel.dev documentation
+            base_url = "wss://connect.steel.dev"
+            
+            # Add API key
+            cdp_url = f"{base_url}?apiKey={self.settings.STEEL_API_KEY}"
+            
+            # Add session ID if provided, exactly as in documentation
+            if session_id:
+                cdp_url = f"{cdp_url}&sessionId={session_id}"
+                
+            # Log the URL (partially redacted for security)
+            api_key = self.settings.STEEL_API_KEY
+            redacted_key = f"{api_key[:8]}...{api_key[-8:]}" if len(api_key) > 16 else "***"
+            redacted_url = cdp_url.replace(api_key, redacted_key)
+            logger.info(f"Created Steel.dev CDP URL: {redacted_url}")
+            
+            return cdp_url
+        except Exception as e:
+            logger.error(f"Error creating Steel.dev CDP URL: {e}")
+            return None
+            
     async def initialize_browser(self, user_id: int = 1):
         """Initialize browser for a specific user if not already initialized"""
         try:
@@ -150,29 +182,80 @@ class BrowserService:
             
             logger.info(f"Initializing new browser instance for user {user_id}")
             
-            # Check if we're using Steel.dev CDP connection
-            using_steel = (self.browser_config.get('browserless', False) and 
-                          hasattr(self._browser_config, 'cdp_url') and 
-                          'steel.dev' in self._browser_config.cdp_url)
+            # Check if we're using Steel.dev
+            using_steel = (self.browser_config.get('browserless', False) and self.settings.STEEL_API_KEY)
             
             if using_steel:
-                # For Steel.dev, add a custom session ID for each user to help with tracking
+                # Create a copy of the browser config for this user with only valid parameters
+                user_browser_config = BrowserConfig(
+                    headless=self._browser_config.headless
+                )
+                
+                # For Steel.dev, generate a unique session ID for each user
                 import uuid
                 session_id = str(uuid.uuid4())
                 
-                # Update the cdp_url to include the session ID
-                current_cdp_url = self._browser_config.cdp_url
-                if '?' in current_cdp_url:
-                    self._browser_config.cdp_url = f"{current_cdp_url}&sessionId={session_id}"
-                else:
-                    self._browser_config.cdp_url = f"{current_cdp_url}?sessionId={session_id}"
-                
                 # Store the session ID for later reference
                 self._current_contexts[user_id] = {'session_id': session_id}
-                logger.info(f"Created Steel.dev session with ID {session_id} for user {user_id}")
-            
-            # Initialize the browser with configured settings
-            self._browsers[user_id] = Browser(self._browser_config)
+                
+                # Create the proper Steel.dev CDP URL with the helper method
+                cdp_url = self._create_steel_cdp_url(session_id)
+                if cdp_url:
+                    # Important: Make sure we've imported the proper Browser class
+                    from browser_use.browser.browser import Browser
+                    
+                    # Set the CDP URL on the browser config
+                    user_browser_config.cdp_url = cdp_url
+                    logger.info(f"Configured Steel.dev connection with session ID {session_id} for user {user_id}")
+                    
+                    # Add additional debug information
+                    logger.debug(f"Browser config for Steel.dev: {user_browser_config}")
+                    
+                    # Initialize the browser with this user's config
+                    try:
+                        logger.info(f"Creating browser with Steel.dev CDP URL...")
+                        
+                        # Try first with exact settings from Steel.dev documentation
+                        self._browsers[user_id] = Browser(user_browser_config)
+                        logger.info(f"Successfully created browser with Steel.dev CDP URL")
+                        
+                        # Try to get additional information about the browser connection
+                        try:
+                            if hasattr(self._browsers[user_id], 'browser') and self._browsers[user_id].browser:
+                                browser_info = self._browsers[user_id].browser
+                                logger.info(f"Browser connection info: {browser_info}")
+                                
+                                # Try to get browser version to verify connection
+                                if hasattr(browser_info, 'version'):
+                                    logger.info(f"Connected browser version: {browser_info.version}")
+                        except Exception as browser_info_err:
+                            logger.warning(f"Failed to get browser info: {browser_info_err}")
+                            
+                    except Exception as e:
+                        # Log detailed error information
+                        logger.error(f"Error creating browser with Steel.dev CDP URL: {e}", exc_info=True)
+                        logger.warning(f"Error type: {type(e).__name__}")
+                        
+                        # Try alternative URL format if the first one failed
+                        try:
+                            logger.info("Trying alternative Steel.dev connection format...")
+                            # Try alternative URL format without the 'wss://' prefix
+                            alt_url = cdp_url.replace("wss://", "")
+                            user_browser_config.cdp_url = alt_url
+                            self._browsers[user_id] = Browser(user_browser_config)
+                            logger.info(f"Successfully connected using alternative URL format: {alt_url}")
+                        except Exception as alt_err:
+                            logger.error(f"Alternative connection also failed: {alt_err}")
+                            logger.info("Falling back to standard browser initialization")
+                            # Fall back to standard browser initialization
+                            self._browsers[user_id] = Browser(self._browser_config)
+                else:
+                    logger.warning(f"Failed to create Steel.dev CDP URL, falling back to standard browser")
+                    # Fall back to standard browser initialization
+                    self._browsers[user_id] = Browser(self._browser_config)
+            else:
+                # Standard browser initialization with base config
+                self._browsers[user_id] = Browser(self._browser_config)
             
             # Wait for browser to initialize
             await asyncio.sleep(3)
@@ -191,7 +274,7 @@ class BrowserService:
             
             return self._browsers[user_id]
         except Exception as e:
-            logger.error(f"Error initializing browser for user {user_id}: {e}")
+            logger.error(f"Error initializing browser for user {user_id}: {e}", exc_info=True)
             raise
 
     async def _ensure_playwright_browsers(self):
@@ -311,21 +394,68 @@ class BrowserService:
         # Keep track of the keep-alive task
         keep_alive_task = None
         
+        # Track Steel.dev connection failures
+        steel_connection_failures = 0
+        max_steel_connection_failures = 2
+        
         while retries <= max_retries:
             try:
                 # Initialize browser if needed
                 if user_id not in self._browsers or self._browsers[user_id] is None:
+                    logger.info(f"No browser instance for user {user_id}, initializing...")
                     await self.initialize_browser(user_id)
+                
+                # Check if the browser is actually available
+                if not self._browsers[user_id]:
+                    logger.error(f"Failed to initialize browser for user {user_id}")
+                    # Try one more time with different settings
+                    if steel_connection_failures < max_steel_connection_failures:
+                        steel_connection_failures += 1
+                        logger.info(f"Retrying browser initialization (Steel.dev failure {steel_connection_failures}/{max_steel_connection_failures})")
+                        await self.initialize_browser(user_id)
+                        if not self._browsers[user_id]:
+                            return "I'm sorry, but I encountered an issue with the browser connection. Please try again in a moment."
+                    else:
+                        return "I'm sorry, but I encountered an issue with the browser. Please try again in a moment."
+                
+                # Log details about the browser instance
+                browser_instance = self._browsers[user_id]
+                logger.info(f"Using browser instance: {browser_instance}")
+                
+                if hasattr(browser_instance, 'browser') and browser_instance.browser:
+                    logger.info(f"Browser connected: {browser_instance.browser}")
+                else:
+                    logger.warning(f"Browser instance doesn't have a browser property or it's None")
+                    
+                    # Check if this is likely a Steel.dev issue
+                    using_steel = (self.browser_config.get('browserless', False) and self.settings.STEEL_API_KEY)
+                    if using_steel and steel_connection_failures < max_steel_connection_failures:
+                        steel_connection_failures += 1
+                        logger.warning(f"Possible Steel.dev connection issue (failure {steel_connection_failures}/{max_steel_connection_failures})")
+                        need_browser_reset = True
+                        
+                        # Force a reset and retry
+                        await self.cleanup(user_id=user_id, force=True)
+                        await self.initialize_browser(user_id)
+                        
+                        if not self._browsers[user_id] or not hasattr(self._browsers[user_id], 'browser') or not self._browsers[user_id].browser:
+                            if steel_connection_failures >= max_steel_connection_failures:
+                                logger.error("Maximum Steel.dev connection failures reached")
+                                return "I'm sorry, but I'm having trouble connecting to the browser service. Please try again later."
+                            continue
                 
                 # Generate task prompt
                 prompt = await self.generate_task_prompt(query, task_type, user_details.get("history_context", ""))
+                logger.info(f"Generated prompt for query: {query[:50]}...")
                 
                 # Create a new agent for this task
+                logger.info(f"Creating agent for user {user_id}...")
                 agent = Agent(
                     browser=self._browsers[user_id],
                     llm=self.claude_llm,
                     task=prompt
                 )
+                logger.info(f"Agent created successfully for user {user_id}")
                 
                 # Start a task to keep the browser active during execution
                 async def keep_browser_active():
@@ -349,14 +479,23 @@ class BrowserService:
                     is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
                     disable_gif = os.environ.get('DISABLE_GIF_CREATION', 'false').lower() == 'true'
                     
+                    # Log that we're running the agent
+                    logger.info(f"Running agent for user {user_id} with prompt: {prompt[:100]}...")
+                    
                     # Run the agent with appropriate parameters
                     if is_railway or disable_gif:
                         agent_result = await agent.run(max_steps=12, disable_history=True)
                     else:
                         agent_result = await agent.run(max_steps=12)
                     
+                    # Log the result type
+                    logger.info(f"Agent completed successfully. Result type: {type(agent_result)}")
+                    
                     # Extract the final result
                     result = self.extract_final_result(agent_result)
+                    
+                    # Log a snippet of the result
+                    logger.info(f"Extracted result: {result[:100]}...")
                     
                     # Reset Anthropic failures counter on success
                     self._anthropic_failures = 0
@@ -371,6 +510,9 @@ class BrowserService:
                     break
                     
                 except Exception as e:
+                    # Log the full error and traceback
+                    logger.error(f"Error running agent: {e}", exc_info=True)
+                    
                     error_str = str(e).lower()
                     
                     # Check for Playwright browser installation issues
@@ -404,6 +546,18 @@ class BrowserService:
                         except Exception as install_error:
                             logger.error(f"Error installing Playwright browsers: {install_error}")
                             result = "I'm sorry, but I encountered a technical issue. Please try again later."
+                    
+                    # Check for Steel.dev connection issues
+                    elif any(term in error_str for term in ["connection", "websocket", "cdp", "browser"]):
+                        steel_connection_failures += 1
+                        logger.error(f"Possible Steel.dev connection issue ({steel_connection_failures}/{max_steel_connection_failures}): {e}")
+                        
+                        need_browser_reset = True
+                        result = "I'm sorry, but I encountered an issue with the browser connection. Please try again in a moment."
+                        
+                        if steel_connection_failures >= max_steel_connection_failures:
+                            logger.error("Maximum Steel.dev connection failures reached")
+                            return "I'm sorry, but I'm having trouble connecting to the browser service. Please try again later."
                     
                     # Check for Anthropic API overload
                     elif any(term in error_str for term in ["overloaded", "502", "too many requests", "rate limit"]):
@@ -450,7 +604,7 @@ class BrowserService:
                         return "I'm sorry, but our service is currently experiencing technical difficulties. Please try again in a few minutes."
             
             except Exception as e:
-                logger.error(f"Error in execute_search for user {user_id}: {e}")
+                logger.error(f"Error in execute_search for user {user_id}: {e}", exc_info=True)
                 need_browser_reset = True
                 result = f"I encountered an error: {str(e)}"
             
@@ -511,6 +665,7 @@ class BrowserService:
                 if user_id in self._browsers and self._browsers[user_id] is not None:
                     logger.info(f"Cleaning up browser for user {user_id}")
                     try:
+                        # Close the browser
                         await self._browsers[user_id].close()
                         
                         # For Steel.dev sessions, release the session via API if possible
@@ -533,10 +688,11 @@ class BrowserService:
                                 logger.warning("Steel SDK not available for releasing session")
                             except Exception as steel_err:
                                 logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
-                            
+                    
                     except Exception as e:
                         logger.warning(f"Error closing browser for user {user_id}: {e}")
                     finally:
+                        # Clean up references
                         self._browsers[user_id] = None
                         if user_id in self._last_activity_times:
                             del self._last_activity_times[user_id]
@@ -550,6 +706,7 @@ class BrowserService:
                 for uid, browser in list(self._browsers.items()):
                     if browser is not None:
                         try:
+                            # Close the browser
                             await browser.close()
                             
                             # Release Steel.dev session if applicable
@@ -571,7 +728,7 @@ class BrowserService:
                                     logger.warning("Steel SDK not available for releasing session")
                                 except Exception as steel_err:
                                     logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
-                            
+                        
                         except Exception as e:
                             logger.warning(f"Error closing browser for user {uid}: {e}")
                         finally:
@@ -656,7 +813,7 @@ class BrowserService:
                                     logger.warning("Steel SDK not available for releasing session")
                                 except Exception as steel_err:
                                     logger.warning(f"Error releasing Steel.dev session {session_id}: {steel_err}")
-                            
+                        
                         except Exception as e:
                             logger.warning(f"Error force closing browser for user {uid}: {e}")
                 
@@ -704,14 +861,14 @@ class BrowserService:
         # Set level to INFO to ensure all browser operations are logged
         self.logger.setLevel(logging.INFO)
         
-        # Force browser-use logger to INFO level as well
+        # Force browser-use logger to DEBUG level for more details
         browser_use_logger = logging.getLogger('browser_use')
-        browser_use_logger.setLevel(logging.INFO)
+        browser_use_logger.setLevel(logging.DEBUG)
         
-        # Force related loggers to INFO as well
-        for logger_name in ['browser_use.agent', 'browser_use.browser', 'browser_use.context']:
+        # Force related loggers to DEBUG as well for maximum visibility
+        for logger_name in ['browser_use.agent', 'browser_use.browser', 'browser_use.context', 'playwright._impl._api_types']:
             logger = logging.getLogger(logger_name)
-            logger.setLevel(logging.INFO)
+            logger.setLevel(logging.DEBUG)
         
         # Log browser configuration
         self.logger.info(f"Browser config initialized: {self.browser_config}")
@@ -726,24 +883,13 @@ class BrowserService:
             self.claude_llm = ChatAnthropic(model=settings.CLAUDE_MODEL)
             self.logger.info(f"Claude LLM initialized with model: {settings.CLAUDE_MODEL}")
             
-            # Configure browser
+            # Configure base browser config with only valid parameters
             self.browser_config_obj = BrowserConfig(
-                headless=self.browser_config['headless'],
-                disable_security=True
+                headless=self.browser_config['headless']
             )
             
-            # Add browserless configuration if enabled
-            if self.browser_config.get('browserless', False):
-                # Configure CDP connection using Steel.dev's recommended approach
-                if self.settings.STEEL_API_KEY:
-                    # Use the WebSocket endpoint with apiKey as recommended in the Steel.dev docs
-                    self.browser_config_obj.cdp_url = f"wss://connect.steel.dev?apiKey={self.settings.STEEL_API_KEY}"
-                    self.logger.info("Steel API key configured for Chrome DevTools Protocol connection")
-                else:
-                    # Fall back to the provided browserless URL if no Steel API key
-                    self.browser_config_obj.cdp_url = self.browser_config.get('browserless_url')
-                
-                self.logger.info(f"Browserless configuration added: CDP URL={self.browser_config_obj.cdp_url}")
+            # We'll set up the CDP URL dynamically in initialize_browser
+            # to ensure we have unique session IDs per browser instance
             
             # Initialize class-level browser config
             BrowserService._browser_config = self.browser_config_obj

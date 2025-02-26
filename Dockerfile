@@ -10,6 +10,14 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     fonts-liberation \
     fontconfig \
+    libfreetype6-dev \
+    fonts-dejavu \
+    fonts-dejavu-core \
+    fonts-dejavu-extra \
+    ttf-dejavu \
+    ttf-dejavu-core \
+    ttf-dejavu-extra \
+    fonts-freefont-ttf \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache

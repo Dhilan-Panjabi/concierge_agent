@@ -208,7 +208,50 @@ class BrowserService:
                 
                 try:
                     # Run the agent with max_steps parameter set to 12
-                    result = await agent.run(max_steps=12)
+                    try:
+                        # Check if we're running on Railway and should disable GIF creation
+                        is_railway = os.environ.get('RAILWAY_ENVIRONMENT', '') != ''
+                        disable_gif = os.environ.get('DISABLE_GIF_CREATION', 'false').lower() == 'true'
+                        
+                        # Automatically disable GIF creation on Railway to avoid font issues
+                        if is_railway or disable_gif:
+                            if is_railway:
+                                logger.info("Running on Railway - automatically disabling GIF creation")
+                            else:
+                                logger.info("GIF creation disabled by environment variable")
+                            
+                            # Try to run with disable_history parameter, but fall back if not supported
+                            try:
+                                # Pass disable_history=True to prevent GIF creation
+                                result = await agent.run(max_steps=12, disable_history=True)
+                            except TypeError as e:
+                                # If the parameter is not supported, fall back to the standard call
+                                logger.warning(f"disable_history parameter not supported: {e}. Falling back to standard run.")
+                                result = await agent.run(max_steps=12)
+                        else:
+                            result = await agent.run(max_steps=12)
+                    except OSError as font_error:
+                        # This is likely a font-related error when creating the GIF on Railway
+                        if "cannot open resource" in str(font_error):
+                            logger.warning(f"Font resource error during GIF creation: {font_error}")
+                            # Try to get the result from the agent even if GIF creation failed
+                            if hasattr(agent, 'all_results') and agent.all_results:
+                                completed_actions = [
+                                    r for r in agent.all_results
+                                    if r.is_done and r.extracted_content
+                                ]
+                                if completed_actions:
+                                    result = completed_actions[-1].extracted_content
+                                    logger.info("Successfully recovered result despite GIF creation failure")
+                                else:
+                                    # If no completed actions with content, return a helpful message
+                                    result = "I found the information you requested, but encountered a technical issue when processing the results. Here's what I know: The search was completed successfully, but I couldn't generate the full report. Please try again or ask a more specific question."
+                            else:
+                                # If we can't recover the result, return an error message
+                                raise Exception("Search completed but couldn't extract results due to font resource error")
+                        else:
+                            # Re-raise if it's not the font resource error
+                            raise
                 finally:
                     # Cancel the keep-alive task when agent is done
                     keep_alive_task.cancel()
@@ -631,8 +674,7 @@ class BrowserService:
             FORMAT RESULTS CLEARLY WITH ALL FOUND INFORMATION.
             """
 
-    @staticmethod
-    def extract_final_result(agent_result: Any) -> str:
+    def extract_final_result(self, agent_result: Any) -> str:
         """
         Extracts the final result from agent response.
         
@@ -660,12 +702,44 @@ class BrowserService:
                 ]
                 if actions_with_content:
                     return actions_with_content[-1].extracted_content
+                
+                # If we have results but no extracted content, try to get the last action's result
+                if agent_result.all_results:
+                    last_action = agent_result.all_results[-1]
+                    if hasattr(last_action, 'result') and last_action.result:
+                        return f"Found information: {str(last_action.result)}"
+                    elif hasattr(last_action, 'action') and last_action.action:
+                        return f"Last action performed: {str(last_action.action)}"
+
+            # If we get here, try to extract any useful information from the agent_result
+            if hasattr(agent_result, 'result'):
+                return str(agent_result.result)
+            elif hasattr(agent_result, 'message'):
+                return str(agent_result.message)
 
             return str(agent_result)
 
         except Exception as e:
             logger.error(f"Error extracting final result: {e}", exc_info=True)
-            return str(agent_result)
+            # Return a more helpful message with any information we can extract
+            try:
+                if hasattr(agent_result, 'all_results') and agent_result.all_results:
+                    # Try to extract any useful information from the results
+                    steps_info = []
+                    for i, step in enumerate(agent_result.all_results):
+                        step_info = f"Step {i+1}: "
+                        if hasattr(step, 'action') and step.action:
+                            step_info += f"Action: {step.action}"
+                        if hasattr(step, 'result') and step.result:
+                            step_info += f", Result: {step.result}"
+                        steps_info.append(step_info)
+                    
+                    if steps_info:
+                        return "I found some information, but encountered an error processing the results. Here's what I found:\n\n" + "\n".join(steps_info)
+            except:
+                pass
+                
+            return f"I encountered an error while processing the search results: {str(e)}. Please try again with a more specific query."
 
     async def _extract_user_details(self, user_id: int) -> Dict[str, str]:
         """

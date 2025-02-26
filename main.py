@@ -18,6 +18,7 @@ from src.bot.handlers import MessageHandler
 from src.bot.commands import CommandHandler
 from src.bot.conversation import ConversationManager
 from src.utils.message_utils import MessageUtils
+from src.utils.browser_use_patch import apply_patches
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +26,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Apply patches for Railway compatibility
+apply_patches()
 
 
 class BookingBot:

@@ -10,6 +10,6 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
     "healthcheckPath": "/telegram/webhook",
-    "healthcheckTimeout": 10
+    "healthcheckTimeout": 30
   }
 } 

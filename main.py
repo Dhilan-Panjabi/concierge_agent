@@ -8,6 +8,8 @@ import os
 from typing import Optional
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socket
+import time
 
 from telegram import Update
 from telegram.ext import Application, CallbackContext, CommandHandler as TelegramCommandHandler
@@ -39,21 +41,22 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle GET requests"""
+        logger.info(f"Health check request received: {self.path}")
         if self.path == "/telegram/webhook":
             self.send_response(200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
+            logger.info("Health check responded with 200 OK")
         else:
             self.send_response(404)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
             self.wfile.write(b"Not Found")
+            logger.info(f"Responded with 404 for path: {self.path}")
     
     def log_message(self, format, *args):
         """Override to reduce log noise"""
-        if args[0].startswith("GET /telegram/webhook"):
-            return
         logger.info("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
 
 
@@ -281,6 +284,15 @@ def main():
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+    # Configure more verbose logging for debugging
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO
+    )
+    logger.info("Starting application...")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Current directory: {os.getcwd()}")
+
     try:
         # Start a simple HTTP server for health checks
         def start_health_check_server():
@@ -289,38 +301,62 @@ def main():
                 
                 class HealthCheckHandler(BaseHTTPRequestHandler):
                     def do_GET(self):
+                        logger.info(f"Health check request received: {self.path}")
                         if self.path == "/telegram/webhook":
                             self.send_response(200)
                             self.send_header("Content-type", "text/plain")
                             self.end_headers()
                             self.wfile.write(b"OK")
+                            logger.info("Health check responded with 200 OK")
                         else:
                             self.send_response(404)
                             self.send_header("Content-type", "text/plain")
                             self.end_headers()
                             self.wfile.write(b"Not Found")
+                            logger.info(f"Responded with 404 for path: {self.path}")
                     
                     def log_message(self, format, *args):
-                        # Suppress log messages for health checks
-                        if args[0].startswith("GET /telegram/webhook"):
-                            return
                         logger.info("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
                 
                 # Start the server on port 8080
-                server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
-                logger.info("Starting health check server on port 8080")
-                server.serve_forever()
+                try:
+                    server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+                    logger.info("Health check server created successfully on port 8080")
+                    
+                    # Test if the port is actually open and listening
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    result = sock.connect_ex(('127.0.0.1', 8080))
+                    if result == 0:
+                        logger.info("Port 8080 is open and listening")
+                    else:
+                        logger.error(f"Port 8080 is not open! Error code: {result}")
+                    sock.close()
+                    
+                    logger.info("Starting health check server...")
+                    server.serve_forever()
+                except socket.error as e:
+                    logger.error(f"Socket error when starting health check server: {e}")
+                    raise
+                
             except Exception as e:
-                logger.error(f"Error starting health check server: {e}")
+                logger.error(f"Error starting health check server: {e}", exc_info=True)
+                raise
         
         # Start the health check server in a separate thread
         import threading
+        logger.info("Creating health check server thread...")
         health_check_thread = threading.Thread(target=start_health_check_server, daemon=True)
         health_check_thread.start()
         logger.info("Health check server thread started")
         
+        # Wait a moment to ensure the health check server is running
+        time.sleep(2)
+        logger.info("Waited for health check server to initialize")
+        
         # Start the bot
+        logger.info("Initializing bot...")
         bot = BookingBot()
+        logger.info("Starting bot...")
         bot.run()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")

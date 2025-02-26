@@ -66,5 +66,9 @@ ENV DISABLE_GIF_CREATION=true
 ENV RAILWAY_ENVIRONMENT=production
 ENV USE_WEBHOOK=true
 
+# Expose ports
+EXPOSE 8080
+EXPOSE 8443
+
 # Run the bot
 CMD ["python", "main.py"] 
